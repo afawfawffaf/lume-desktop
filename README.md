@@ -1,15 +1,92 @@
 > **非官方修改版**
 > 本仓库是第三方修改版，与 Lume 原作者无关，不是官方发布。
-> 修改内容：新增桌面音乐大卡片（双击音乐组件封面打开，透明玻璃歌词面板，
-> 右键菜单可调样式、字体、颜色、特效、动画强度与背景），移除音乐组件关闭按钮，
-> 收窄动态岛触发区域。
-> 依 AGPL-3.0 分发；"Lume" 名称、标志与图标不在授权范围内。
+> 依 AGPL-3.0 分发；"Lume" 名称、标志与图标不在授权范围内。改动明细见下文「本仓库的改动」一节。
 
 # Lume 桌面客户端源码
 
 这是 Lume Windows 桌面客户端（壁纸、桌面组件、任务栏、Dock、灵动岛、音乐等）的完整源码，
 对应同版本号的官方安装包 `LumeSetup-<版本>.exe`。本次导出对应的版本和源码提交写在
 [`SOURCE-REVISION.txt`](SOURCE-REVISION.txt)。
+
+## 本仓库的改动
+
+基于上游 Lume 1.0.8 源码（提交 `0d0678ec`）修改。以下全部改动均为 AGPL-3.0 第 5 条意义上的
+修改内容说明。
+
+### 1. 桌面音乐大卡片（新增功能）
+
+双击桌面上音乐组件的封面，弹出一块透明玻璃的歌词面板，位于桌面层而非主窗口内。
+
+**交互**
+
+| 操作 | 行为 |
+|---|---|
+| 双击组件封面 | 打开卡片；卡片已打开时双击卡片则收起 |
+| 按住卡片拖动 | 移动，位置写入 `music-page.json` |
+| 拖四边/四角 | 缩放（最小 480×360，最大 1600×1200，默认 900×620），大小写入 `music-page.json` |
+| 右键 | 设置菜单 |
+| 右键 → 关闭卡片 | 收起卡片 |
+
+卡片没有可见按钮：关闭按钮已按要求移除，所有操作由手势和右键菜单承担。
+
+**右键菜单**
+
+- 歌词样式：13 种（云阶、浮名、商籁、画境、3D、绘光、心象、倾诉、群唱、镜台、时计、流光、凝彩）
+- 字体设置：默认 / 楷体 / 宋体 / 雅黑
+- 歌词颜色：`lyricsFontColor`、`lyricsKaraokeFillColor`、`sonnetColors.*`（5 个取色器）
+- 特效：关闭 / 雨窗 / 雪天 / 星河
+- 动画强度：平静 / 标准 / 强烈
+- 背景设置：自选图片 / 清除
+- 打开音乐设置、关闭卡片
+
+改动即时生效，无需暂停播放。卡片与主窗口共享同一份偏好记录，任一侧修改另一侧同步。
+
+**实现要点**
+
+- 卡片是**第二个视图**，不是第二个播放器：壳层把与组件相同的快照推给卡片，
+  卡片的命令进入已有的音乐命令队列（`apps/shell/music_page_session.*`）
+- 布局参数复用主窗口的沉浸式歌词舞台（`mountMusicVisualizer`），因此表现手法与主窗口一致
+- 偏好经 `scope:"music-preferences"` 通道提交，带 `revision` 做乐观并发控制；
+  壳层把回复同时转发给卡片，否则卡片会一直引用旧 revision 导致除首次外的保存全部冲突
+- 背景复用主窗口的 `WallpaperCompositor`，媒体以解析后的 URL 传给卡片，文件路径不出壳层
+
+### 2. 桌面音乐组件
+
+- 移除右上角的关闭按钮（`ports.showCloseButton = false`）：该按钮绘制在封面附近，
+  伸手点封面时容易误触，导致组件直接隐藏
+- 封面纳入交互面（`interactiveAt`），用于识别双击手势，且不再被误判为缩放边带
+
+### 3. 灵动岛
+
+收窄悬停触发范围：只有指针真正进入屏幕顶部 10 DIP 带才触发展开，
+在胶囊附近移动不再误触发。已展开的岛屿保持原有矩形可点击，否则面板按钮点不到。
+
+### 改动的文件
+
+新增：
+
+```
+platform/windows/music/music_page_window.{h,cpp}   卡片窗口（WebView2 承载）
+apps/shell/music_page_session.{h,cpp}              卡片会话（几何持久化、消息分发）
+ui/music-page.html                                 卡片页面
+ui/music-page.css                                  卡片样式
+ui/music-page.js                                   卡片渲染与交互
+ui/music-page-menu.js                              右键菜单
+ui/music-page-settings.js                          设置页中的卡片尺寸控件
+```
+
+修改：
+
+```
+platform/windows/music_desktop_controls.{h,cpp}    新增 ExpandHandler；移除关闭按钮
+apps/shell/music_desktop_session.{h,cpp}           把展开手势转给壳层
+apps/shell/desktop_application.{h,cpp}             拥有卡片会话、推送状态、分发消息
+platform/windows/dynamic_island/island_window.cpp  收窄悬停判定
+platform/windows/private_messages.txt              登记卡片窗口私有消息 0x6e6
+cmake/LayerSessions.cmake                          新增 lume-music-page-session 目标
+ui/app.js  ui/bridge.js  ui/music.js
+ui/music-view.js  ui/music-entry.js                卡片状态与设置页接线
+```
 
 ## 许可
 
