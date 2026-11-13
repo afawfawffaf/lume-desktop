@@ -1,0 +1,305 @@
+/* The desktop music card. It is a lyric surface and nothing else: the stage is
+   the immersive player's own stage, drawn edge to edge on a transparent glass
+   pane. The native window supplies the frosted pixels behind this document, so
+   this stylesheet must never paint an opaque background of its own. */
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  color: #f5f5f7;
+  font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* The card has no visible chrome: its only controls are in the right-click
+   menu. The cursor is the sole affordance, so it is set from script. */
+#music-page {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 22px;
+  background: rgba(10, 10, 12, 0.18);
+  isolation: isolate;
+  cursor: grab;
+}
+
+/* The stage fills the card. Its visualizers already scale their own type, so the
+   lyrics stay centred and legible from the smallest card to the largest. */
+.MusicPageStage {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  /* The stage renders into a sandboxed iframe in most modes. That iframe would
+     swallow every pointer event, so the card could never be dragged or resized:
+     the card is a picture, not a control, and the gesture belongs to the window. */
+  pointer-events: none;
+}
+
+.MusicPageEffects {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The selected background media, drawn by the same compositor as the main
+   window. It sits under the effects and the lyric stage. */
+.MusicPageBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.MusicPageClose {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.82);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.MusicPageClose:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.MusicPageClose:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.7);
+  outline-offset: 2px;
+}
+
+.MusicPageClose svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
+/* The right-click menu: the card's only chrome. The host is a full-card layer
+   that only carries pointer events; the panel itself is fixed-positioned so no
+   ancestor scroll, clip or transform can move or hide it. */
+.MusicCardMenuHost {
+  position: absolute;
+  z-index: 10;
+  inset: 0;
+  padding: 0;
+  /* No overflow rule: a fixed-position panel must never be clipped by this
+     layer, and the card already clips at its own rounded edge. */
+  pointer-events: none;
+}
+
+/* The panel is sized by the viewport, never by a measured ancestor: a zero or
+   stale card rect used to collapse it to a sliver with its own scrollbar. */
+.MusicCardMenu {
+  position: fixed;
+  width: 212px;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(22, 22, 26, 0.92);
+  backdrop-filter: blur(28px) saturate(140%);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  font-size: 12.5px;
+  color: #f2f2f4;
+  pointer-events: auto;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.MusicCardMenu::-webkit-scrollbar {
+  width: 7px;
+}
+
+.MusicCardMenu::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.MusicCardMenu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.MusicCardMenuRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.MusicCardMenuRow:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.MusicCardMenuLabel {
+  flex: 1 1 auto;
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+}
+
+.MusicCardMenuValue {
+  flex: 0 0 auto;
+  max-width: 108px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* An expanded section is an inline list under its header, not a flyout: the
+   panel is one scroll container, so a long list never gets clipped. */
+.MusicCardMenuList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 6px;
+  padding: 4px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.MusicCardMenuList[hidden] {
+  display: none;
+}
+
+.MusicCardMenuList button {
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.MusicCardMenuList button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.MusicCardMenuList button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.MusicCardMenuList button[aria-checked="true"] {
+  background: rgba(255, 255, 255, 0.2);
+  font-weight: 600;
+}
+
+.MusicCardMenuColors {
+  gap: 4px;
+}
+
+.MusicCardMenuColor {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.78);
+  cursor: pointer;
+}
+
+.MusicCardMenuColor:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.MusicCardMenuColor input[type="color"] {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.MusicCardMenuColor input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.MusicCardMenuColor input[type="color"]::-webkit-color-swatch {
+  border: 0;
+  border-radius: 4px;
+}
+
+.MusicCardMenuRow:focus-visible,
+.MusicCardMenuList button:focus-visible,
+.MusicCardMenuAction:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.7);
+  outline-offset: 1px;
+}
+
+.MusicCardMenuDivider {
+  height: 1px;
+  margin: 5px 4px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.MusicCardMenuAction {
+  display: block;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.MusicCardMenuAction:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* The stage draws its own frame; inside the card it must not add another one. */
+.MusicPageStage > .MusicReferenceStage,
+.MusicPageStage > canvas,
+.MusicPageStage > div {
+  border-radius: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .MusicPageClose {
+    transition: none;
+  }
+}
