@@ -50,13 +50,38 @@
   壳层把回复同时转发给卡片，否则卡片会一直引用旧 revision 导致除首次外的保存全部冲突
 - 背景复用主窗口的 `WallpaperCompositor`，媒体以解析后的 URL 传给卡片，文件路径不出壳层
 
-### 2. 桌面音乐组件
+### 2. LX 歌单同步（新增功能）
+
+上游版本没有这个功能。在本地音乐页新增「同步 LX 歌单」按钮，把 LX Music 的歌单拉取到本地目录。
+
+**行为**
+
+- 按钮位于本地音乐页的导入操作区，与「导入本地音乐」「导入文件夹」并列
+- 同步期间按钮禁用，并显示进度 `正在同步 LX 歌单 <已完成>/<总数>`
+- 完成后提示「LX 歌单同步完成」；失败提示「无法同步 LX 歌单」
+- 同步是独立进程，不阻塞播放和界面
+
+**组成**
+
+```
+native-rebuild/tools/lxsync.py                             拉取脚本（Python）
+native-rebuild/platform/windows/lx_sync_runner.{h,cpp}     进程启动、进度读取
+apps/shell/desktop_application.cpp                         StartLxSync / DrainLxSync
+ui/music-library.js                                        syncLx() 命令通道
+ui/music-view.js                                           「同步 LX 歌单」按钮与提示
+ui/music-entry.js                                          进度与完成通知
+```
+
+脚本路径默认取程序目录下的 `lxsync.py`，输出目录默认为 `D:\Music\LX music`，
+两者都在 `StartLxSync()` 附近，可按需修改。
+
+### 3. 桌面音乐组件
 
 - 移除右上角的关闭按钮（`ports.showCloseButton = false`）：该按钮绘制在封面附近，
   伸手点封面时容易误触，导致组件直接隐藏
 - 封面纳入交互面（`interactiveAt`），用于识别双击手势，且不再被误判为缩放边带
 
-### 3. 灵动岛
+### 4. 灵动岛
 
 收窄悬停触发范围：只有指针真正进入屏幕顶部 10 DIP 带才触发展开，
 在胶囊附近移动不再误触发。已展开的岛屿保持原有矩形可点击，否则面板按钮点不到。
@@ -73,6 +98,8 @@ ui/music-page.css                                  卡片样式
 ui/music-page.js                                   卡片渲染与交互
 ui/music-page-menu.js                              右键菜单
 ui/music-page-settings.js                          设置页中的卡片尺寸控件
+platform/windows/lx_sync_runner.{h,cpp}            LX 歌单同步进程管理
+native-rebuild/tools/lxsync.py                     LX 歌单拉取脚本
 ```
 
 修改：
@@ -80,12 +107,15 @@ ui/music-page-settings.js                          设置页中的卡片尺寸�
 ```
 platform/windows/music_desktop_controls.{h,cpp}    新增 ExpandHandler；移除关闭按钮
 apps/shell/music_desktop_session.{h,cpp}           把展开手势转给壳层
-apps/shell/desktop_application.{h,cpp}             拥有卡片会话、推送状态、分发消息
+apps/shell/desktop_application.{h,cpp}             拥有卡片会话、推送状态、分发消息；
+                                                   LX 同步的启动与进度排空
 platform/windows/dynamic_island/island_window.cpp  收窄悬停判定
 platform/windows/private_messages.txt              登记卡片窗口私有消息 0x6e6
 cmake/LayerSessions.cmake                          新增 lume-music-page-session 目标
 ui/app.js  ui/bridge.js  ui/music.js
-ui/music-view.js  ui/music-entry.js                卡片状态与设置页接线
+ui/music-view.js  ui/music-entry.js                卡片状态与设置页接线；
+                                                   LX 同步按钮、提示与进度
+ui/music-library.js                                LX 同步命令通道
 ```
 
 ## 许可

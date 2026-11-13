@@ -4,3 +4,5 @@ native-rebuild/out/
 native-rebuild/.vs/
 *.user
 *.suo
+__pycache__/
+*.pyc
