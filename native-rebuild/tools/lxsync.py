@@ -31,13 +31,31 @@ import urllib.request
 
 DEFAULT_LIST = 'kg_46915abaf2573ff48bc131bf3e9f2de1'   # 「松清喜欢的音乐」
 DEFAULT_OUT = r'D:\Music\LX music'
-RESOLVER = 'https://mcp.nianxinxz.com/share/ceshi/{src}.php?id={id}&level={level}&type=mp3'
+# 解析站：把 {src} {id} {level} 替换成对应值后请求，返回音频地址。
+# 这不是官方渠道，随时可能失效，所以允许用户换掉：命令行 --resolver 优先，
+# 其次是脚本同目录 lxsync-config.json 里的 resolver 字段。
+# 留空则该功能不可用，会直接报错而不是静默失败。
+RESOLVER = ''
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
 AUDIO_EXT = ('.mp3', '.m4a', '.flac', '.aac', '.ogg')
 CONVERT_EXT = ('.m4a', '.aac')
 WORKERS = 4
 
 lock = threading.Lock()
+
+CONFIG_NAME = 'lxsync-config.json'
+
+
+def load_config(path=None):
+    """读取脚本同目录的配置；缺失或损坏都当作没有配置，不报错。"""
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_NAME)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            value = json.load(f)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
 done = 0
 total = 0
 
@@ -459,9 +477,28 @@ def main():
     ap.add_argument('--no-lyric', action='store_true')
     ap.add_argument('--no-cover', action='store_true')
     ap.add_argument('--no-convert', action='store_true')
+    ap.add_argument('--resolver', default='',
+                    help='解析站模板，含 {src} {id} {level}；留空则用配置文件里的')
     args = ap.parse_args()
 
-    global total
+    global total, RESOLVER
+    # The resolution service is not an official channel: it can change or vanish,
+    # so it is read from the command line or the config file rather than baked in.
+    config = load_config()
+    RESOLVER = (args.resolver or config.get('resolver') or '').strip()
+    if not RESOLVER:
+        emit('LVEND', {'ok': 0, 'fail': 0, 'skip': 0, 'converted': 0, 'total': 0,
+                       'error': '未配置解析站：在 lxsync-config.json 填 resolver，或用 --resolver 传入'})
+        return 1
+    if '{id}' not in RESOLVER:
+        emit('LVEND', {'ok': 0, 'fail': 0, 'skip': 0, 'converted': 0, 'total': 0,
+                       'error': '解析站模板缺少 {id} 占位符'})
+        return 1
+    # 歌单和输出目录也允许由配置文件补足，命令行优先。
+    if not args.list or args.list == DEFAULT_LIST:
+        args.list = config.get('list') or args.list
+    if not args.out:
+        args.out = config.get('out') or DEFAULT_OUT
     counters = {}
     try:
         conn = open_db()
