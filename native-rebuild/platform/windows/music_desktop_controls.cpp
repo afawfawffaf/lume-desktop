@@ -73,8 +73,15 @@ std::wstring Time(double seconds) {
 }
 
 struct Layout {
-    WidgetRect artwork, title, artist, elapsed, remaining, seek, buttons[3];
-    float titleSize, artistSize, timeSize, iconSize;
+    // The volume track runs along the bottom row beside the transport buttons;
+    // `volumeKnob` is its hit target, drawn only while the widget is hovered.
+    WidgetRect artwork, title, artist, elapsed, remaining, seek, buttons[3], volume, volumeKnob;
+    // The pin sits at the title row's right end: it is the one control that is
+    // always visible, because the state it holds applies while the card is not
+    // being touched.
+    WidgetRect pin;
+    float titleSize, artistSize, timeSize, iconSize, volumeIconSize;
+    bool volumeShown;
 };
 
 Layout Arrange(float w, float h) {
@@ -90,13 +97,54 @@ Layout Arrange(float w, float h) {
     const float cy = y + (sy - gap[tier] - y - cover[tier]) / 2;
     const float tx = x + cover[tier] + metaGap[tier], tw = w - x - tx - 16;
     const float timeWidth = tier == 2 ? 64.f : 54.f;
-    Layout result{{x, cy, cover[tier], cover[tier]}, {tx, cy, tw, cover[tier]/2},
-        {tx, cy+cover[tier]/2, tw, cover[tier]/2},
-        {x, sy, timeWidth, row[tier]}, {w-x-timeWidth, sy, timeWidth, row[tier]},
-        {x+timeWidth+9, sy, content-2*timeWidth-18, row[tier]}, {},
-        titleSize[tier], artistSize[tier], timeSize[tier], iconSize[tier]};
+    // Named assignment, not a braced list: the volume fields sit between the
+    // button array and the font sizes, and a positional list silently shifted
+    // every later field into the wrong slot.
+    Layout result{};
+    result.artwork = {x, cy, cover[tier], cover[tier]};
+    // The pin takes a square at the end of the title row; the title shortens to
+    // make room rather than being overlapped.
+    const float pinSize = tier == 2 ? 22.f : tier == 1 ? 20.f : 18.f;
+    result.pin = {w - x - pinSize, cy + 2, pinSize, pinSize};
+    result.title = {tx, cy, std::max(40.f, tw - pinSize - 8), cover[tier]/2};
+    result.artist = {tx, cy+cover[tier]/2, tw, cover[tier]/2};
+    result.elapsed = {x, sy, timeWidth, row[tier]};
+    result.remaining = {w-x-timeWidth, sy, timeWidth, row[tier]};
+    result.seek = {x+timeWidth+9, sy, content-2*timeWidth-18, row[tier]};
+    result.titleSize = titleSize[tier];
+    result.artistSize = artistSize[tier];
+    result.timeSize = timeSize[tier];
+    result.iconSize = iconSize[tier];
     for (int i = 0; i < 3; ++i)
         result.buttons[i] = {w/2-b/2+(i-1)*(b+spacing[tier]), by, b, b};
+    // Volume sits to the right of the transport cluster on the same row. It is
+    // never dropped: the strip between the cluster and the right margin sizes
+    // the track, so the smallest widget keeps a short but usable slider.
+    const float lastButtonRight = result.buttons[2].x + result.buttons[2].width;
+    const float rightEdge = w - x - 4;
+    const float gapAfterCluster = tier == 2 ? spacing[tier]*.55f : 4.f;
+    const float iconBox = tier == 2 ? 22.f : tier == 1 ? 18.f : 14.f;
+    const float stripStart = lastButtonRight + gapAfterCluster;
+    // The icon needs its own square plus a little breathing room before the track.
+    const float trackRoom = rightEdge - stripStart - iconBox - 4;
+    const float maxTrack = tier == 2 ? 96.f : tier == 1 ? 78.f : 56.f;
+    const float trackWidth = std::min(maxTrack, trackRoom);
+    if (trackRoom >= 12.f) {
+        const float volumeY = by + (b - row[tier]) / 2;
+        result.volume = {stripStart + iconBox + 4, volumeY, trackWidth, row[tier]};
+        result.volumeKnob = {stripStart, volumeY - (iconBox - row[tier])/2,
+                             iconBox + 4 + trackWidth, iconBox};
+        result.volumeIconSize = iconBox;
+        result.volumeShown = true;
+    } else {
+        // Last resort on an extremely narrow card: the glyph alone still toggles
+        // mute, so the control degrades instead of disappearing.
+        const float volumeY = by + (b - row[tier]) / 2;
+        result.volume = {stripStart + iconBox, volumeY, 1, row[tier]};
+        result.volumeKnob = {stripStart, volumeY - (iconBox - row[tier])/2, iconBox, iconBox};
+        result.volumeIconSize = iconBox;
+        result.volumeShown = rightEdge >= stripStart + iconBox;
+    }
     return result;
 }
 
@@ -424,6 +472,11 @@ MusicDesktopState ProjectMusicDesktopState(const music::MusicSnapshot& snapshot)
     state.canSkip = state.canToggle && !snapshot.queue.empty();
     state.canSeek = state.canToggle && state.duration > 0;
     state.playing = state.canToggle && snapshot.playing;
+    // The widget always owns a volume slider, even before a track is loaded:
+    // the session keeps that value for the next one.
+    state.volume = std::isfinite(snapshot.volume) ? std::clamp(snapshot.volume, 0.0, 1.0) : 1.0;
+    state.muted = snapshot.muted;
+    state.canVolume = snapshot.session != 0;
     if (!ready || !valid) state.title = snapshot.status == music::PlaybackStatus::Error ?
         L"\u97f3\u4e50\u4fe1\u606f\u6682\u4e0d\u53ef\u7528" : L"\u6682\u65e0\u64ad\u653e";
     else if (state.title.empty()) state.title = L"\u672a\u77e5\u6b4c\u66f2";
@@ -431,7 +484,20 @@ MusicDesktopState ProjectMusicDesktopState(const music::MusicSnapshot& snapshot)
 }
 
 std::optional<ui::MusicPageCommand> MusicDesktopCommand(
-    const MusicDesktopState& state, Action action, double position) {
+    const MusicDesktopState& state, Action action, double position, double volume) {
+    // Volume is the one control that stays usable before a track is loaded:
+    // it belongs to the session, not to the current track.
+    if (action == Action::SetVolume || action == Action::SetMuted) {
+        if (!state.canVolume || !std::isfinite(volume)) return {};
+        ui::MusicPageCommand command;
+        command.action = action;
+        command.session = state.session;
+        command.id = state.trackId;
+        command.volume = std::clamp(volume, 0.0, 1.0);
+        // Mute travels as a boolean: a level above zero means "unmute".
+        command.flag = volume > 0;
+        return command;
+    }
     if (!state.canToggle || !state.session || state.trackId.empty()) return {};
     switch (action) {
     case Action::Play: if (state.playing) return {}; break;
@@ -537,8 +603,8 @@ struct MusicDesktopControls::Impl {
             Dispatch(item.action, item.position);
         }
     }
-    bool Dispatch(Action action, double position = 0) {
-        const auto command = MusicDesktopCommand(state, action, position);
+    bool Dispatch(Action action, double position = 0, double volume = -1) {
+        const auto command = MusicDesktopCommand(state, action, position, volume);
         if (stopped || !command || !handler) return false;
         const auto callback = handler;
         try { callback(*command); }
@@ -647,7 +713,7 @@ struct MusicDesktopControls::Impl {
         }
     }
     void CancelGesture() {
-        pressed = -1; seeking = false;
+        pressed = -1; seeking = false; volumePreview = -1;
         if (window && window->Handle() && GetCapture() == window->Handle()) ReleaseCapture();
     }
     void Hide() {
@@ -817,22 +883,58 @@ struct MusicDesktopControls::Impl {
         return Arrange(static_cast<float>(rect.right)*96/std::max(1u, dpi),
             static_cast<float>(rect.bottom)*96/std::max(1u, dpi));
     }
-    bool Enabled(int control) const { return control == 3 ? state.canSeek :
-        control == 1 ? state.canToggle : (control == 0 || control == 2) && state.canSkip; }
+    bool Enabled(int control) const {
+        // The pin is always usable: it is a preference about the card, not about
+        // the track, so it must not depend on anything playing.
+        if (control == 5) return true;
+        return control == 4 ? state.canVolume : control == 3 ? state.canSeek :
+            control == 1 ? state.canToggle : (control == 0 || control == 2) && state.canSkip;
+    }
     int Hit(float x, float y) const {
         const auto layout = Geometry();
+        // 5 is the pin. It is checked first so a tap near the title's end always
+        // reaches it rather than the row behind it.
+        if (Contains(layout.pin, x, y)) return 5;
         for (int i = 0; i < 3; ++i) if (Contains(layout.buttons[i], x, y)) return i;
-        return Contains(layout.seek, x, y) ? 3 : -1;
+        if (Contains(layout.seek, x, y)) return 3;
+        // 4 is the volume area: the mute icon on the left plus the level track.
+        if (layout.volumeShown && Contains(layout.volumeKnob, x, y)) return 4;
+        return -1;
     }
     void SeekAt(float x) {
         const auto rect = Geometry().seek;
         preview = std::clamp(static_cast<double>((x-rect.x)/rect.width), 0.0, 1.0)*state.duration;
     }
+    // The volume track spans `volume`; a click sets the level, and the icon on
+    // its left toggles mute.
+    double VolumeAt(float x) const {
+        const auto layout = Geometry();
+        if (!layout.volumeShown || layout.volume.width <= 0) return state.volume;
+        return std::clamp(static_cast<double>((x-layout.volume.x)/layout.volume.width), 0.0, 1.0);
+    }
+    bool VolumeIconAt(float x, float y) const {
+        const auto layout = Geometry();
+        if (!layout.volumeShown) return false;
+        return Contains({layout.volumeKnob.x, layout.volumeKnob.y, layout.volume.x - layout.volumeKnob.x,
+                         layout.volumeKnob.height}, x, y);
+    }
     void Activate(int control) {
+        if (control == 5) {
+            // The pin is a property of the card, reported to the parent so the
+            // island can stay out and the card can stay above other windows.
+            pinned = !pinned;
+            if (widgetHandler) widgetHandler(WidgetAction::Pin, window->Bounds());
+            window->Paint();
+            return;
+        }
         if (control == 3) Dispatch(Action::Seek, preview);
+        else if (control == 4) Dispatch(Action::SetVolume, 0, volumePreview >= 0 ? volumePreview : state.volume);
         else if (control >= 0 && control < 3) Dispatch(control == 0 ? Action::Previous :
             control == 1 ? Action::Toggle : Action::Next);
     }
+    // The glyph is the mute toggle; the track only sets the level. Muting keeps
+    // the level so unmuting restores it instead of jumping to full volume.
+    void Mute() { Dispatch(Action::SetMuted, 0, state.muted ? state.volume : 0.0); }
     std::optional<LRESULT> Input(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         if (msg == WM_SIZE || msg == WM_DPICHANGED) { UpdateTooltips(); return {}; }
         const auto dpi = std::max(1u, GetDpiForWindow(hwnd));
@@ -858,11 +960,23 @@ struct MusicDesktopControls::Impl {
             SetCapture(hwnd);
             seeking = hit == 3;
             if (seeking) SeekAt(x);
+            // The volume icon mutes instead of dragging the level.
+            if (hit == 4 && VolumeIconAt(x, y)) { Mute(); return 0; }
+            if (hit == 4) { volumePreview = VolumeAt(x); Dispatch(Action::SetVolume, 0, volumePreview); }
             window->Paint(); return 0;
         }
         if (msg == WM_MOUSEMOVE) {
             const int hit = Hit(x, y);
             if (seeking) { SeekAt(x); window->Paint(); return 0; }
+            // Dragging the level reports continuously; the session coalesces it.
+            if (pressed == 4 && hit == 4) {
+                const auto level = VolumeAt(x);
+                if (std::abs(level - volumePreview) > 0.002) {
+                    volumePreview = level;
+                    Dispatch(Action::SetVolume, 0, level);
+                }
+                window->Paint(); return 0;
+            }
             if (hover != hit) { hover = hit; window->Paint(); }
             return {};
         }
@@ -870,8 +984,9 @@ struct MusicDesktopControls::Impl {
         if (msg == WM_LBUTTONUP && pressed >= 0) {
             const int control = pressed;
             const bool accept = gestureGeneration == generation && Enabled(control) &&
-                (seeking || Hit(x, y) == control);
+                (seeking || pressed == 4 || Hit(x, y) == control);
             if (seeking) SeekAt(x);
+            if (pressed == 4) volumePreview = -1;
             CancelGesture(); window->Paint();
             if (accept) Activate(control);
             return 0;
@@ -886,15 +1001,25 @@ struct MusicDesktopControls::Impl {
             if (w == VK_TAB) {
                 const int step = GetKeyState(VK_SHIFT) < 0 ? -1 : 1;
                 if (focus < 0 && step < 0) focus = 0;
-                for (int i = 0; i < 4; ++i) {
-                    focus = (focus+step+4)%4;
+                // Five stops: previous, toggle, next, seek, volume.
+                for (int i = 0; i < 5; ++i) {
+                    focus = (focus+step+5)%5;
                     if (Enabled(focus)) break;
                 }
                 window->Paint(); return 0;
             }
             if ((l & (1LL << 30)) != 0) return 0;
-            if ((w == VK_SPACE || w == VK_RETURN) && focus != 3) {
+            if ((w == VK_SPACE || w == VK_RETURN) && focus != 3 && focus != 4) {
                 Activate(focus < 0 ? 1 : focus); return 0;
+            }
+            if (focus == 4 && state.canVolume &&
+                (w == VK_LEFT || w == VK_RIGHT || w == VK_UP || w == VK_DOWN || w == VK_HOME || w == VK_END)) {
+                // The volume row answers the vertical keys too, matching a slider.
+                const double step = 0.05;
+                const bool down = w == VK_LEFT || w == VK_DOWN;
+                const double level = w == VK_HOME ? 0 : w == VK_END ? 1 :
+                    std::clamp(state.volume+(down ? -step : step), 0.0, 1.0);
+                Dispatch(Action::SetVolume, 0, level); return 0;
             }
             if (focus == 3 && state.canSeek) {
                 if (w == VK_LEFT || w == VK_RIGHT || w == VK_HOME || w == VK_END) {
@@ -924,6 +1049,7 @@ struct MusicDesktopControls::Impl {
         }
         Ellipsis(canvas, state.title.empty() ? L"\u6682\u65e0\u64ad\u653e" : state.title,
             layout.title, layout.titleSize, 1, true);
+        DrawPin(canvas, layout.pin, pinned, hover == 5);
         Ellipsis(canvas, state.canToggle ? (state.artist.empty() ? state.album : state.artist) : L"",
             layout.artist, layout.artistSize, .7f);
         const auto position = seeking ? preview : state.position;
@@ -942,6 +1068,58 @@ struct MusicDesktopControls::Impl {
         if (focus == 3) canvas.Line(seek.x, seek.y+seek.height-1, seek.x+seek.width, seek.y+seek.height-1, 0xffffff);
         for (int i = 0; i < 3; ++i)
             DrawTransportIcon(canvas, layout.buttons[i], layout.iconSize, i, state.playing, Enabled(i));
+        DrawVolume(canvas, layout);
+    }
+    // A pin glyph: a round head on a short stem, filled while it is set. It is
+    // drawn from primitives so the widget needs no image resource.
+    void DrawPin(WidgetCanvas& canvas, const WidgetRect& box, bool on, bool highlighted) {
+        const float cx = box.x + box.width / 2, cy = box.y + box.height / 2;
+        const float a = on ? .95f : highlighted ? .75f : .42f;
+        const auto rgb = on ? 0x4d8dff : 0xffffff;
+        canvas.Ellipse({cx - 4, cy - 6, 8, 8}, rgb, a);
+        canvas.Line(cx, cy - 1, cx, cy + 6, rgb, a, 1.8f);
+        // A set pin gets a ring around the head, so the state reads at a glance
+        // even when the colour is lost to a dark wallpaper.
+        if (on) canvas.AnnularSector(cx, cy - 2, 6, 7, 0, 360, rgb, .5f);
+    }
+    // A speaker glyph plus a level track. The glyph doubles as the mute toggle,
+    // so it gains a slash while muted and dims while the widget has no session.
+    void DrawVolume(WidgetCanvas& canvas, const Layout& layout) {
+        if (!layout.volumeShown) return;
+        const auto box = layout.volumeKnob;
+        const auto& track = layout.volume;
+        const float level = volumePreview >= 0 ? static_cast<float>(volumePreview) :
+            (state.muted ? 0.f : static_cast<float>(state.volume));
+        const float alpha = state.canVolume ? (hover == 4 ? 1.f : .8f) : .3f;
+        const float icon = layout.volumeIconSize;
+        const float cx = box.x + icon/2;
+        const float cy = box.y + box.height/2;
+        const float size = icon*.5f;
+        // Speaker body and its cone, drawn from primitives like the transport icons.
+        canvas.Rounded({cx-size*.62f, cy-size*.26f, size*.52f, size*.52f}, size*.1f, 0xffffff, alpha);
+        canvas.Line(cx-size*.1f, cy-size*.26f, cx+size*.14f, cy-size*.72f, 0xffffff, alpha, 2);
+        canvas.Line(cx+size*.14f, cy-size*.72f, cx+size*.14f, cy+size*.72f, 0xffffff, alpha, 2);
+        canvas.Line(cx+size*.14f, cy+size*.72f, cx-size*.1f, cy+size*.26f, 0xffffff, alpha, 2);
+        if (state.muted || !state.canVolume) {
+            // Slash: mute is a state of the glyph, not a separate button.
+            canvas.Line(cx-size*.5f, cy-size*.6f, cx+size*.95f, cy+size*.6f, 0xffffff, alpha*.9f, 1.5f);
+        } else if (level > 0) {
+            // One arc-ish tick per third of the range keeps the glyph readable.
+            for (int i = 0; i < 3 && level > i/3.f; ++i) {
+                const float inset = i*size*.22f;
+                canvas.Line(cx+size*.32f+inset, cy-size*.42f+i*size*.1f,
+                    cx+size*.58f+inset, cy-size*.16f+i*size*.1f, 0xffffff, alpha*.85f, 1.5f);
+                canvas.Line(cx+size*.58f+inset, cy-size*.16f+i*size*.1f,
+                    cx+size*.32f+inset, cy+size*.16f+i*size*.1f, 0xffffff, alpha*.85f, 1.5f);
+            }
+        }
+        const float mid = track.y + track.height/2;
+        canvas.Rounded({track.x, mid-2, track.width, 4}, 2, 0xffffff, state.canVolume ? .22f : .1f);
+        if (level > 0)
+            canvas.Rounded({track.x, mid-2, track.width*std::clamp(level, 0.f, 1.f), 4}, 2, 0xffffff, alpha);
+        if (state.canVolume)
+            canvas.Rounded({track.x+track.width*std::clamp(level, 0.f, 1.f)-4, mid-4, 8, 8}, 4, 0xffffff);
+        if (focus == 4) canvas.Line(track.x, track.y+track.height-1, track.x+track.width, track.y+track.height-1, 0xffffff);
     }
 
     HINSTANCE instance;
@@ -959,8 +1137,15 @@ struct MusicDesktopControls::Impl {
     std::array<std::wstring, 5> tooltipText;
     bool coverAttempted = false, metadataDirty = true, stopped = false;
     bool seeking = false;
+    // The card stays above other windows and asks the island to stay out. Held
+    // here because it is a property of this surface; the parent is told, not
+    // asked, so the pin keeps working with no parent listening.
+    bool pinned = false;
     int pressed = -1, hover = -1, focus = -1;
     double preview = 0;
+    // The level while the pointer drags the volume track; -1 means "read the
+    // session", so a dragging finger wins over a snapshot that is still in flight.
+    double volumePreview = -1;
     std::uint64_t generation = 0, gestureGeneration = 0;
     std::shared_ptr<bool> alive = std::make_shared<bool>(true);
     std::shared_ptr<MediaInbox> inbox = std::make_shared<MediaInbox>();
@@ -1014,6 +1199,7 @@ MusicDesktopControls::MusicDesktopControls(HINSTANCE instance, CommandHandler ca
     : impl_(std::make_unique<Impl>(instance, std::move(callback), std::move(widgetCallback),
                                    std::move(wake), std::move(expand))) {}
 MusicDesktopControls::~MusicDesktopControls() = default;
+void MusicDesktopControls::Refresh() { impl_->window->Paint(); }
 void MusicDesktopControls::Update(const music::MusicSnapshot& snapshot) { impl_->Update(snapshot); }
 bool MusicDesktopControls::Configure(const widget::Preferences& prefs) {
     if (impl_->stopped || !impl_->window->Configure(prefs)) return false;

@@ -93,6 +93,61 @@ public:
 int main(int argc, char** argv) {
     Expect(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)), "COM 初始化失败");
     {
+        // The layout is a braced-free struct of rectangles; a field added in the
+        // middle used to shift every later rectangle without a compiler warning.
+        // These checks pin the order and the volume row down.
+        for (const auto& [w, h] : {std::pair{320.f, 152.f}, std::pair{480.f, 240.f}, std::pair{700.f, 340.f}}) {
+            const auto layout = Arrange(w, h);
+            Expect(layout.artwork.x <= layout.title.x && layout.title.x <= w, "封面与标题顺序错误");
+            Expect(layout.title.y + layout.title.height <= layout.artist.y + 1, "标题与歌手重叠");
+            Expect(layout.elapsed.x < layout.seek.x && layout.seek.x < layout.remaining.x, "进度行顺序错误");
+            Expect(layout.seek.width > 0 && layout.seek.height > 0, "进度条尺寸无效");
+            for (int i = 0; i < 3; ++i) {
+                Expect(layout.buttons[i].width > 0 && layout.buttons[i].height > 0, "播放按钮尺寸无效");
+                Expect(layout.buttons[i].y >= layout.seek.y + layout.seek.height - 1, "按钮压到进度行");
+            }
+            Expect(layout.buttons[0].x < layout.buttons[1].x && layout.buttons[1].x < layout.buttons[2].x,
+                "播放按钮顺序错误");
+            Expect(layout.titleSize > 0 && layout.artistSize > 0 && layout.timeSize > 0 && layout.iconSize > 0,
+                "字号未赋值");
+            if (layout.volumeShown) {
+                Expect(layout.volume.width > 0 && layout.volume.y >= layout.seek.y, "音量条位置无效");
+                Expect(layout.volume.x >= layout.buttons[2].x, "音量条压到播放按钮");
+                Expect(layout.volume.x + layout.volume.width <= w, "音量条超出组件");
+                Expect(layout.volumeKnob.x <= layout.volume.x, "音量命中区未覆盖图标");
+                Expect(layout.volumeIconSize > 0, "音量图标尺寸未赋值");
+            }
+        }
+        const auto wide = Arrange(700, 340);
+        Expect(wide.volumeShown, "宽档应显示音量控件");
+        // The volume control must survive every supported size, including the
+        // minimum: it degrades to a shorter track, never disappears.
+        for (const auto& [w, h] : {std::pair{320.f, 152.f}, std::pair{360.f, 180.f},
+                                   std::pair{480.f, 240.f}, std::pair{560.f, 280.f}, std::pair{720.f, 720.f}}) {
+            const auto layout = Arrange(w, h);
+            Expect(layout.volumeShown, "最小尺寸也必须有音量控件");
+            Expect(layout.volumeKnob.width >= layout.volumeIconSize, "音量命中区小于图标");
+            Expect(layout.volumeKnob.x + layout.volumeKnob.width <= w + 1, "音量控件越界");
+            Expect(layout.volume.x >= layout.buttons[2].x + layout.buttons[2].width - 1, "音量条压到播放按钮");
+        }
+        // The pin: a control that must exist at every size, sit inside the card,
+        // and never overlap the title it sits beside.
+        for (const auto& [w, h] : {std::pair{320.f, 152.f}, std::pair{360.f, 180.f},
+                                   std::pair{480.f, 240.f}, std::pair{560.f, 280.f},
+                                   std::pair{700.f, 340.f}, std::pair{720.f, 720.f}}) {
+            const auto layout = Arrange(w, h);
+            Expect(layout.pin.width > 0 && layout.pin.height > 0, "图钉尺寸无效");
+            Expect(layout.pin.x >= 0 && layout.pin.x + layout.pin.width <= w + 1, "图钉超出组件");
+            Expect(layout.pin.y >= 0 && layout.pin.y + layout.pin.height <= h + 1, "图钉超出组件高度");
+            // The title shortens to make room; it must not run under the pin.
+            Expect(layout.title.x + layout.title.width <= layout.pin.x + 1, "标题压到图钉");
+            // The pin lives on the title row, not over the transport buttons.
+            Expect(layout.pin.y + layout.pin.height <= layout.seek.y + 1, "图钉压到进度行");
+            for (int i = 0; i < 3; ++i)
+                Expect(layout.pin.x + layout.pin.width <= layout.buttons[i].x ||
+                       layout.pin.x >= layout.buttons[i].x + layout.buttons[i].width,
+                       "图钉与播放按钮重叠");
+        }
         auto sample = Sample();
         const auto state = ProjectMusicDesktopState(sample);
         Expect(state.session == 42 && state.trackId == "native-track" && state.position == 25 &&

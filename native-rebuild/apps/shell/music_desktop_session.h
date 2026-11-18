@@ -38,6 +38,16 @@ public:
     // its own desktop music card; the widget never opens a window itself.
     MusicDesktopSession(HINSTANCE, MusicDesktopSessionOptions, CommandHandler,
                         std::function<void()> openSettings, std::function<void()> expand = {});
+    // Reports the widget's pin, already toggled inside the widget: the parent
+    // only applies the effect (island held, card in front).
+    void SetPinHandler(std::function<void(bool)> handler);
+    bool Pinned() const;
+    // Toggles the pin and returns the new state. Exposed for callers that are not
+    // the widget (a menu, a test); the widget itself reports through the handler.
+    bool Pin();
+    // The widget's HWND, or null while it is hidden. Used by the parent to
+    // change its z-order when the pin is toggled.
+    HWND Handle() const;
     ~MusicDesktopSession();
     MusicDesktopSession(const MusicDesktopSession&) = delete;
     MusicDesktopSession& operator=(const MusicDesktopSession&) = delete;

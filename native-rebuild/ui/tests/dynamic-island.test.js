@@ -7,7 +7,7 @@ import {catalog,search} from '../pages.js';
 import {islandPage,validIslandState} from '../dynamic-island.js';
 import {setLanguage} from '../localization.js';
 const snapshot=(fields={})=>({version:1,type:'dynamicIsland-state',enabled:false,running:false,locked:false,
-  expanded:false,focusing:false,finished:false,remaining:0,hideFullscreen:true,topmost:true,hover:false,autoHide:false,size:'standard',material:'none',
+  expanded:false,focusing:false,finished:false,remaining:0,hideFullscreen:true,topmost:true,hover:false,autoHide:false,size:'standard',material:'none',offset:-1,
   loadStatus:'fresh',error:'',result:'snapshot',saved:false,...fields});
 
 test('island appears immediately after Dock in the styles catalog and search',()=>{
@@ -22,7 +22,8 @@ test('island bridge rejects malformed commands and snapshots',()=>{
   const sent=[];const bridge=createBridge({postMessage:m=>sent.push(m)});
   assert.ok(validIslandState(snapshot()));assert.ok(validHostMessage(snapshot()));
   for(const fields of [{enabled:'true'},{remaining:1501},{remaining:NaN},{running:true},{extra:true},
-    {saved:true,result:'snapshot'},{loadStatus:'bad'},{error:'unknown'},{size:'huge'},{hover:1},{material:'glass'},{hideIdle:false}])assert.equal(validHostMessage(snapshot(fields)),false);
+    {saved:true,result:'snapshot'},{loadStatus:'bad'},{error:'unknown'},{size:'huge'},{hover:1},{material:'glass'},{hideIdle:false},
+    {offset:'center'},{offset:null},{offset:NaN}])assert.equal(validHostMessage(snapshot(fields)),false);
   for(const command of [['enabled',true],['locked',false],['expand'],['collapse'],['focus'],['stopFocus'],['reset'],
     ['hideFullscreen',true],['topmost',false],['hover',true],['size','large'],['material','liquid-glass'],['autoHide',true]])
     assert.ok(bridge.send('dynamicIsland',...command));

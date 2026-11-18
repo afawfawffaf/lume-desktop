@@ -4,17 +4,49 @@ import {t} from './localization.js';
 
 export function validIslandState(m) {
   const keys=['version','type','enabled','running','locked','expanded','focusing','finished','remaining',
-    'hideFullscreen','topmost','hover','autoHide','size','material','loadStatus','error','result','saved'];
+    'hideFullscreen','topmost','hover','autoHide','size','offset','material','loadStatus','error','result','saved'];
   return !!m && typeof m==='object' && !Array.isArray(m) && Object.keys(m).length===keys.length &&
     keys.every(key=>Object.hasOwn(m,key)) && m.version===1 && m.type==='dynamicIsland-state' &&
     ['enabled','running','locked','expanded','focusing','finished','saved','hideFullscreen','topmost','hover','autoHide'].every(key=>typeof m[key]==='boolean') &&
     islandSizes.includes(m.size) && islandMaterials.includes(m.material) &&
+    typeof m.offset==='number' && Number.isFinite(m.offset) &&
     Number.isInteger(m.remaining) && m.remaining>=0 && m.remaining<=1500 &&
     ['fresh','loaded','recovered','failed'].includes(m.loadStatus) && ['','runtime','save','rollback'].includes(m.error) &&
     ['snapshot','applied'].includes(m.result) && (!m.running || m.enabled) &&
     (!m.saved || (m.result==='applied' && !m.error && m.loadStatus==='loaded'));
 }
 export const islandSizes=['small','standard','large'];
+// One WorkBuddy account. The reply never carries a token: only whether the
+// account is connected and the last reading the host fetched. `id` is the uid
+// the API assigned and is the only handle used to remove an account.
+const WORKBUDDY_SLOT_KEYS=['build','id','connected','label','status','remaining','plan'];
+export function validWorkBuddyState(m) {
+  const keys=['version','type','slots','desktopAvailable','aiAvailable'];
+  if(!m||typeof m!=='object'||Array.isArray(m)||Object.keys(m).length!==keys.length||
+    !keys.every(key=>Object.hasOwn(m,key))||m.version!==1||m.type!=='workbuddy-state'||
+    typeof m.desktopAvailable!=='boolean'||typeof m.aiAvailable!=='boolean'||
+    !Array.isArray(m.slots))return false;
+  return m.slots.every(s=>{
+    if(!s||typeof s!=='object'||Object.keys(s).length!==WORKBUDDY_SLOT_KEYS.length||
+      !WORKBUDDY_SLOT_KEYS.every(key=>Object.hasOwn(s,key)))return false;
+    return ['desktop','ai'].includes(s.build)&&
+      typeof s.id==='string'&&s.id.length<=128&&
+      typeof s.connected==='boolean'&&typeof s.label==='string'&&s.label.length<=64&&
+      typeof s.status==='string'&&s.status.length<=16&&
+      typeof s.remaining==='number'&&Number.isFinite(s.remaining)&&
+      typeof s.plan==='string'&&s.plan.length<=64;
+  });
+}
+// The quota page's reply. It never carries the key itself, only whether one is
+// stored and the last reading the host fetched.
+export function validQuotaState(m) {
+  const keys=['version','type','hasKey','running','ok','available','error','amount','currency'];
+  return !!m && typeof m==='object' && !Array.isArray(m) && Object.keys(m).length===keys.length &&
+    keys.every(key=>Object.hasOwn(m,key)) && m.version===1 && m.type==='quota-state' &&
+    ['hasKey','running','ok','available'].every(key=>typeof m[key]==='boolean') &&
+    typeof m.error==='string' && m.error.length<=16 && typeof m.amount==='string' && m.amount.length<=32 &&
+    typeof m.currency==='string' && m.currency.length<=8 && (!m.running || m.hasKey);
+}
 export const islandMaterials=['none','liquid-glass','frosted-glass'];
 const materialOptions=()=>[['none',t('纯黑','Black')],['liquid-glass',t('液态玻璃','Liquid glass')],['frosted-glass',t('磨砂玻璃','Frosted glass')]];
 const sizeOptions=()=>[['small',t('小','Small')],['standard',t('标准','Standard')],['large',t('大','Large')]];
@@ -37,14 +69,75 @@ export function islandStatus(state) {
   return '';
 }
 const busy=state=>['loading','saving','unavailable'].includes(state.dynamicIslandStatus);
+// The quota page's only configuration: a key, saved encrypted by the host.
+// Nothing here ever shows the stored key back to the page.
+function quotaSection(quota) {
+  const q=quota||{hasKey:false,running:false,ok:false,available:false,error:'',amount:'',currency:''};
+  const status=q.running?t('正在查询余额…','Fetching balance…'):
+    !q.hasKey?t('未设置密钥，灵动岛不会显示该页','No key saved; the page stays hidden'):
+    q.ok?`${q.currency==='USD'?'$':'¥'}${q.amount} · ${q.available?t('可用','Available'):t('余额不足','Insufficient')}`:
+    q.error==='auth'?t('密钥无效','Key rejected'):
+    q.error==='parse'?t('响应无法识别','Unrecognised response'):
+    q.error==='network'?t('网络请求失败','Network request failed'):
+    q.error==='save'?t('密钥保存失败','Could not save the key'):
+    t('尚未查询','Not fetched yet');
+  return `<div class="setting-row island-option"><label>${t('DeepSeek 余额','DeepSeek balance')}<small>${t('保存 API Key 后，灵动岛会多一个余额页签，鼠标滚轮可切换。密钥用 Windows 凭据加密保存，只用于向 DeepSeek 查询余额。','After saving an API key the island gains a balance page you reach with the wheel. The key is encrypted with Windows credentials and only ever sent to DeepSeek.')}</small></label><span class="island-quota-status">${status}</span></div>`+
+    `<div class="setting-row island-quota-input"><label for="island-quota-key">${t('API Key','API Key')}</label><input id="island-quota-key" type="password" autocomplete="off" spellcheck="false" maxlength="512" placeholder="${q.hasKey?t('已保存，输入可替换','Saved; type to replace'):'sk-...'}" ${q.running?'disabled':''}><button type="button" class="reset" data-action="island-quota-save" ${q.running?'disabled':''}>${t('保存','Save')}</button><button type="button" class="reset" data-action="island-quota-clear" ${q.hasKey?'':'disabled'}>${t('清除','Clear')}</button></div>`;
+}
+
+// WorkBuddy and WorkBuddy AI are two separate logins, so the settings page has
+// one block each: its own account list and its own connect button. How many
+// accounts a build has is not fixed — every connected account is listed, and
+// connecting adds another one to that same build.
+function workbuddySection(workbuddy) {
+  const state=workbuddy||{slots:[],desktopAvailable:false,aiAvailable:false};
+  const statusOf=slot=>{
+    if(slot.status==='waiting')return t('等待浏览器授权…','Waiting for the browser…');
+    if(slot.status==='fetching')return t('正在查询…','Fetching…');
+    if(slot.status==='ready')return t('已连接','Connected');
+    if(slot.status==='expired')return t('授权已过期，请重新连接','Expired; connect again');
+    if(slot.status==='auth')return t('授权无效','Rejected');
+    if(slot.status==='network')return t('网络失败','Network failed');
+    if(slot.status==='parse')return t('响应无法识别','Unrecognised response');
+    return t('未连接','Not connected');
+  };
+  const row=slot=>{
+    const busy=slot.status==='waiting'||slot.status==='fetching';
+    const name=slot.connected?(slot.label||t('已连接账号','Connected account')):t('未连接','Not connected');
+    const figure=slot.status==='ready'&&slot.connected?` · ${slot.remaining.toFixed(2)} ${t('积分','credits')}`:'';
+    // A row that is only a pending connection has no uid yet, so it offers no
+    // disconnect button: there is nothing stored to remove.
+    const control=slot.connected
+      ? `<button type="button" class="reset" data-action="island-workbuddy-disconnect" data-wb-build="${slot.build}" data-wb-id="${slot.id}" ${busy?'disabled':''}>${t('断开','Disconnect')}</button>`
+      : '';
+    return `<div class="setting-row island-workbuddy-row"><label>${name}
+      <small>${statusOf(slot)}${figure}</small></label>${control}</div>`;
+  };
+  const build=kind=>{
+    const accounts=state.slots.filter(s=>s.build===kind);
+    const title=kind==='ai'?t('WorkBuddy AI 积分','WorkBuddy AI credits'):t('WorkBuddy 积分','WorkBuddy credits');
+    const hint=kind==='ai'
+      ? t('连接的是 WorkBuddy AI 版本。需要几个账号就点几次「连接」，每个账号单独授权一次。','This signs in to the WorkBuddy AI build. Connect as many accounts as you need; each is authorised once.')
+      : t('连接的是 WorkBuddy 桌面版。需要几个账号就点几次「连接」，每个账号单独授权一次。','This signs in to the WorkBuddy desktop build. Connect as many accounts as you need; each is authorised once.');
+    return `<div class="setting-row island-option"><label>${title}<small>${hint}${t('点「连接」后会在浏览器打开官网登录页，登录完成即自动读取积分。令牌用 Windows 凭据加密保存在本机，只用于查询积分。','Connect opens the sign-in page in your browser; credits are read once you finish. The token is encrypted with Windows credentials and only ever sent to WorkBuddy.')}</small></label></div>`+
+      (accounts.length?accounts.map(row).join(''):`<div class="setting-row island-workbuddy-row"><label>${t('还没有连接账号','No account connected')}<small>${statusOf({status:'none'})}</small></label></div>`)+
+      `<div class="setting-row island-workbuddy-row"><label>${t('添加账号','Add an account')}</label><button type="button" class="reset" data-action="island-workbuddy-connect" data-wb-build="${kind}">${t('连接','Connect')}</button></div>`;
+  };
+  return build('desktop')+build('ai');
+}
+
 export function islandPage(state,tab='settings') {
   const p=state.dynamicIsland,disabled=busy(state),off=disabled||!p.enabled;
+  const quota=state.quota;
+  const workbuddy=state.workbuddy;
   const button=(action,label,inactive=false)=>`<button type="button" class="reset" data-action="dynamicIsland-${action}" ${inactive?'disabled':''}>${label}</button>`;
   const body=tab==='settings' ?
     `<div class="island-preview" aria-hidden="true"><span class="island-cover"></span><span class="island-title">${t('正在播放','Now playing')}</span><span class="island-bars"><i></i><i></i><i></i><i></i></span></div>`+
     `<div class="setting-row"><label>${t('启用灵动岛','Enable Dynamic Island')}</label>${toggle(p.enabled,t('灵动岛','Dynamic Island'),'dynamicIsland-toggle',disabled)}</div>`+
     `<div class="setting-row"><label for="dynamicIsland-material">${t('材质','Material')}</label>${settingsSelect('dynamicIsland-material',t('材质','Material'),p.material,materialOptions(),disabled)}</div>`+
     `<div class="setting-row"><label for="dynamicIsland-size">${t('大小','Size')}</label>${settingsSelect('dynamicIsland-size',t('大小','Size'),p.size,sizeOptions(),disabled)}</div>`+
+    quotaSection(quota)+
+    workbuddySection(workbuddy)+
     displayToggles().map(([action,key,label,hint])=>`<div class="setting-row island-option"><label>${label}<small>${hint}</small></label>${toggle(p[key],label,`dynamicIsland-${action}`,disabled)}</div>`).join('')+
     `<div class="setting-row"><label>${t('展开面板','Expanded panel')}</label>${button(p.expanded?'collapse':'expand',p.expanded?t('收起','Collapse'):t('展开','Expand'),off)}</div>`+
     `<div class="reset-row">${button('reset',t('恢复默认设置','Restore defaults'),disabled)}</div>` :

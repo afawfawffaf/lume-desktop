@@ -24,9 +24,18 @@ body {
   height: 100%;
   overflow: hidden;
   border-radius: 22px;
-  background: rgba(10, 10, 12, 0.18);
+  /* The card is a window onto the desktop, not a panel over it. The native glass
+     behind this document is drawn at zero opacity, so any tint here would be the
+     only thing between the user's wallpaper and the lyrics. It is none. */
+  background: transparent;
   isolation: isolate;
   cursor: grab;
+}
+
+/* A background medium drawn inside the card is its own layer; the page stays
+   transparent either way, so one rule covers both cases. */
+#music-page.has-background {
+  background: transparent;
 }
 
 /* The stage fills the card. Its visualizers already scale their own type, so the
@@ -36,6 +45,13 @@ body {
   inset: 0;
   z-index: 1;
   overflow: hidden;
+  /* The wallpaper behind this card is the user's, so it can be any brightness.
+     A soft vignette under the glyphs keeps white lyrics readable on a white
+     desktop without reading as a panel: it fades to nothing at the edges. */
+  background: radial-gradient(ellipse at center,
+      rgba(0, 0, 0, 0.30) 0%,
+      rgba(0, 0, 0, 0.18) 42%,
+      rgba(0, 0, 0, 0) 78%);
   /* The stage renders into a sandboxed iframe in most modes. That iframe would
      swallow every pointer event, so the card could never be dragged or resized:
      the card is a picture, not a control, and the gesture belongs to the window. */

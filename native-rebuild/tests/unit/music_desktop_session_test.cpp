@@ -28,7 +28,8 @@ struct FakeControls {
 }
 namespace lume::platform::windows {
 struct MusicDesktopControls::Impl {};
-MusicDesktopControls::MusicDesktopControls(HINSTANCE, CommandHandler command, WidgetHandler widget, WakeHandler)
+MusicDesktopControls::MusicDesktopControls(HINSTANCE, CommandHandler command, WidgetHandler widget, WakeHandler,
+                                           ExpandHandler)
     : impl_(std::make_unique<Impl>()) {
     fake = {};
     fake.command = std::move(command);
@@ -36,6 +37,7 @@ MusicDesktopControls::MusicDesktopControls(HINSTANCE, CommandHandler command, Wi
 }
 MusicDesktopControls::~MusicDesktopControls() = default;
 void MusicDesktopControls::Update(const music::MusicSnapshot&) { ++fake.updates; }
+void MusicDesktopControls::Refresh() { ++fake.updates; }
 bool MusicDesktopControls::Configure(const widget::Preferences& prefs) {
     if (fake.failConfigure > 0) { --fake.failConfigure; return false; }
     fake.prefs = prefs;
@@ -50,6 +52,10 @@ bool MusicDesktopControls::Show() {
 void MusicDesktopControls::Hide() { fake.visible = fake.prefs.enabled = false; }
 bool MusicDesktopControls::Visible() const { return fake.visible; }
 widget::Preferences MusicDesktopControls::Bounds() const { return fake.prefs; }
+// The session asks for the widget's window to change its z-order when the pin
+// is toggled. This double never creates one, so the answer is null and the
+// parent's SetWindowPos call is a no-op, which is what the test wants.
+HWND MusicDesktopControls::Handle() const { return nullptr; }
 HRESULT MusicDesktopControls::EnableSystemMediaControls() {
     ++fake.enables;
     fake.registered = !fake.failMedia;
@@ -286,6 +292,47 @@ void Emit(WidgetAction action, const lume::widget::Preferences& value) {
     callback(action, value);
 }
 
+// The pin is a preference about the card, so it is written when it changes and
+// read back on the next launch. Without that a pinned card comes back unpinned,
+// which reads as the feature being broken.
+void Pinned() {
+    Files files;
+    const auto pinPath = std::string("isolated/music-widget-pin.json");
+    {
+        MusicDesktopSessionOptions options{Path, false, &files, {}};
+        MusicDesktopSession session(GetModuleHandleW(nullptr), std::move(options), {}, {});
+        bool reported = false, value = false;
+        session.SetPinHandler([&](bool pinned) { reported = true; value = pinned; });
+        Expect(session.Restore(), "restore");
+        Expect(!session.Pinned(), "默认不置顶");
+        Expect(session.Pin(), "toggle returns the new state");
+        Expect(reported && value, "toggling the pin reports true");
+        Expect(files.values.count(pinPath) && files.values[pinPath].find("true") != std::string::npos,
+               "pin written to disk");
+        session.Pin();
+        Expect(!session.Pinned(), "toggling again clears it");
+        Expect(files.values[pinPath].find("false") != std::string::npos, "cleared pin written");
+    }
+    {
+        // Seeded as if the previous run left it pinned.
+        files.values[pinPath] = "{\"version\":1,\"pinned\":true}";
+        MusicDesktopSessionOptions options{Path, false, &files, {}};
+        MusicDesktopSession session(GetModuleHandleW(nullptr), std::move(options), {}, {});
+        bool restored = false;
+        session.SetPinHandler([&](bool pinned) { restored = restored || pinned; });
+        Expect(session.Restore(), "restore with saved pin");
+        Expect(session.Pinned(), "saved pin restored");
+        Expect(restored, "restored pin reported to the parent");
+    }
+    {
+        // A damaged or absent file means "not pinned", never a failure.
+        files.values[pinPath] = "garbage";
+        MusicDesktopSessionOptions options{Path, false, &files, {}};
+        MusicDesktopSession session(GetModuleHandleW(nullptr), std::move(options), {}, {});
+        Expect(session.Restore() && !session.Pinned(), "damaged pin file is not pinned");
+    }
+}
+
 void NativeLifecycle() {
     Files files;
     int settings = 0, commands = 0;
@@ -417,6 +464,7 @@ int main() {
     Verification();
     Protocol();
 #ifndef LUME_MUSIC_DESKTOP_SESSION_REAL_CONTROLS
+    Pinned();
     NativeLifecycle();
     std::cout << "music desktop session: protocol, persistence, native lifecycle double passed\n";
 #else

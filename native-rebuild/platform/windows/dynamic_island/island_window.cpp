@@ -2,6 +2,12 @@
 #include "platform/windows/diagnostics/runtime_log.h"
 #include "platform/windows/text_util.h"
 #include "platform/windows/dynamic_island/island_weather_page.h"
+#include "platform/windows/dynamic_island/island_quota_page.h"
+#include "platform/windows/dynamic_island/island_quota_tabs.h"
+#include "platform/windows/dynamic_island/island_shelf_page.h"
+#include "platform/windows/dynamic_island/island_drop_target.h"
+#include "platform/windows/dynamic_island/island_dots.h"
+#include "platform/windows/clipboard/clipboard_history.h"
 #include "platform/windows/performance/performance_monitor.h"
 #include "platform/windows/performance/performance_view.h"
 #include "platform/windows/lume_window_ids.h"
@@ -35,7 +41,8 @@ namespace lume::platform::windows {
 namespace {
 constexpr wchar_t ClassName[] = L"LumeWindowsDynamicIsland";
 constexpr UINT_PTR TickTimer = 1, AnimationTimer = 2, HoverTimer = 3, CollapseTimer = 4, BarsTimer = 5, IdleTimer = 6, NoticeTimer = 7,
-                   HotTimer = 8, EdgeTimer = 9;
+                   HotTimer = 8, EdgeTimer = 9, CopiedTimer = 10;
+constexpr UINT FileDragMessage = WM_APP + 0x6f1;
 constexpr UINT ForegroundMessage = WM_APP + 0x6e2, OutsideMessage = WM_APP + 0x6e3, FrameMessage = WM_APP + 0x6e4,
                PerformanceMessage = WM_APP + 0x6e5;
 // Base sizes in DIP before the size option scales them.
@@ -235,6 +242,40 @@ struct IslandWindow::Impl {
     // windows that have to step aside for it.
     bool revealOnEdge = false;
     int pressed = -1, hoverHit = -1;
+    // Dragging slides the capsule along the top edge; the vertical position and
+    // the resting place never change. `dragging` becomes true only once the
+    // pointer has actually moved past the dead zone, so a plain click still
+    // clicks: a press that never moves is a click, not a zero-length drag.
+    bool armed = false;   // press is on the body and may become a drag
+    bool dragging = false;  // the pointer has moved; the capsule follows it
+    POINT dragStart{};
+    // Distance from the grabbed point to the capsule's left edge, in pixels, so
+    // the capsule does not jump under the cursor when the drag begins.
+    float dragGrabX = 0;
+    float dragOffsetAtPress = -1;
+    Moving moved;
+    static constexpr int DragSlop = 4;
+    // Hit codes for the quota page's provider tabs. Everything else this window
+    // returns is a page index (0-6) or a small action code up to 600, so the
+    // tabs live well clear of those.
+    static constexpr int QuotaTabHitBase = 700;
+    // The shelf page's two tabs and its row list, kept clear of every other code.
+    static constexpr int ShelfTabHitBase = 720;
+    // Clipboard rows: three controls each (0 pin, 1 copy, 2 remove). Files: an
+    // open code per chip and a remove code per chip.
+    static constexpr int ShelfClipButtonHitBase = 740;
+    static constexpr int ShelfFileOpenHitBase = 780;
+    static constexpr int ShelfFileRemoveHitBase = 800;
+    static constexpr int ShelfClearHit = 820;
+    static constexpr int ShelfScrollHit = 821;
+    static constexpr int ShelfArrowPrevHit = 822;
+    static constexpr int ShelfArrowNextHit = 823;
+    // The empty part of the page. It is not "nothing": a tap there must not fall
+    // through to a page-dot or a collapse, and the host uses it to dismiss the
+    // "copied" confirmation, so it has to be distinguishable.
+    static constexpr int ShelfBlankHit = 824;
+    // The dot strip's hits start here and run one per page.
+    static constexpr int DotHitBase = 840;
     Spring width, height, presence, tuck;  // tuck: 0 shown, 1 against the screen top.
     Spring pageFade;  // 0 right after a page change, 1 settled.
     IslandPage page = IslandPage::Music;
@@ -242,6 +283,63 @@ struct IslandWindow::Impl {
     calendar::Date month = Today(), selected = Today(), today = Today();
     IslandTodoSource todos;
     dynamic_island::Weather weather;  // Projection of the weather component.
+    // The DeepSeek reading the host pushed; the window never fetches it.
+    quota::DeepSeekBalance quota;
+    // WorkBuddy credits per build, also pushed by the host.
+    std::vector<IslandWorkBuddyAccount> workbuddy, workbuddyAi;
+    // Which provider the one quota page currently shows. The page is a single
+    // wheel stop with a tab strip at the top, not three separate pages: the tabs
+    // are the way to move between providers, and the wheel stays on this page.
+    IslandQuotaTab quotaTab = IslandQuotaTab::DeepSeek;
+    // The shelf page: whichever tab is showing, and the rows to draw for each.
+    // The window never reads the clipboard itself; the host pushes the rows, so
+    // a repaint can never block on another application holding it open.
+    IslandShelfTab shelfTab = IslandShelfTab::Clipboard;
+    std::vector<IslandClipRow> clipRows;
+    std::vector<IslandFileRow> fileRows;
+    std::wstring clipEmpty, fileEmpty;
+    // Which clipboard row was just re-copied, so the page can confirm the tap
+    // where the finger is. -1 when nothing was copied in this visit.
+    int copiedRow = -1;
+    // Clears the confirmation after a moment; the row itself does not change.
+    std::uint64_t copiedStamp = 0;
+    // Clipboard scroll position (row index of the first visible row) and the file
+    // grid's page. Both are view state: they reset when the tab changes, because
+    // the other tab's position means nothing here.
+    int clipOffset = 0;
+    int filePage = 0;
+    // True while the scrollbar's thumb is being dragged.
+    bool scrollDragging = false;
+    // Where the press landed on the thumb and the offset at that moment, so the
+    // thumb keeps its grip while the pointer moves.
+    float scrollGrabY = 0;
+    int scrollGrabOffset = 0;
+    // The press position in client pixels, kept for controls that drag from where
+    // they were grabbed (the scrollbar's thumb).
+    int lastPressY = 0;
+    // A file chip that was pressed: if the pointer moves far enough it becomes a
+    // drag out of the island instead of a click that opens the file.
+    int pressFileCell = -1;
+    POINT pressFilePoint{};
+    // Hands the dropped path to the shell. The window never touches the file, it
+    // only reports which chip was dragged.
+    std::function<void(int cell)> fileDragOut;
+    // True while the shell owns a drag we started. The island must not collapse,
+    // tuck away or repaint itself out from under that modal loop: an OLE drag
+    // keeps the source window pinned until the user lets go.
+    bool shellDragging = false;
+    // The music card asked to stay in front. While set, the island holds its
+    // place instead of tucking away: the card is not useful if the capsule it
+    // belongs to keeps sliding off the screen.
+    bool pinned = false;
+    // Reports which row was tapped and in which tab, so the host can re-copy the
+    // text or open the file. The window itself never touches either.
+    std::function<void(int row, IslandShelfAction)> shelfAct;
+    // Files dragged onto the capsule. The target only reports; the host decides
+    // what to keep, so the window never touches the filesystem.
+    IslandDropTarget dropTarget;
+    std::function<void(std::vector<std::string>)> filesDropped;
+    bool dropHover = false;
     // The performance page samples only while it is open: the worker posts
     // here, and the UI thread reads the latest snapshot.
     std::atomic<HWND> performanceTarget{nullptr};
@@ -309,8 +407,10 @@ struct IslandWindow::Impl {
             height.target = IdleHeight + (hovered ? HoverGrowHeight * .5f : 0);
         }
         presence.target = Wanted() ? 1.f : 0.f;
+        // A pinned island never tucks: the user asked for it to stay put, so the
+        // idle timer and a maximized window must not slide it away.
         const bool idle = display.autoHide && GetTickCount64() >= activeUntil;
-        tuck.target = (idle || maximized) && !hovered && !expanded && !notice ? 1.f : 0.f;
+        tuck.target = !pinned && (idle || maximized) && !hovered && !expanded && !notice ? 1.f : 0.f;
     }
     // Keeps the island out for a while after something happens, then tucks it.
     void Activity(ULONGLONG hold = IdleDelay) {
@@ -487,6 +587,19 @@ struct IslandWindow::Impl {
             desktop_level::Place(hwnd, true);
         }
     }
+    // Where the capsule rests horizontally, in screen pixels. The vertical
+    // position never changes: the island only slides along the top edge.
+    float RestX(float liveWidth) const {
+        MONITORINFO info{sizeof(info)};
+        if (!GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &info))
+            return 0.f;
+        const float left = static_cast<float>(info.rcWork.left);
+        const float room = static_cast<float>(info.rcWork.right - info.rcWork.left);
+        if (display.offset < 0) return left + (room - liveWidth) / 2;
+        // Stored in DIP so the place survives a DPI change; this is pixels.
+        const float perDip = static_cast<float>(std::max(1, Px(1)));
+        return std::clamp(left + display.offset * perDip, left, left + std::max(0.f, room - liveWidth));
+    }
     bool Place() {
         // UpdateLayeredWindow ends by showing the window, which would undo the
         // taskbar edge step-aside mid-animation.
@@ -494,14 +607,12 @@ struct IslandWindow::Impl {
         MONITORINFO info{sizeof(info)};
         if (!GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &info)) return false;
         if (!Draw()) return false;
-        // Centre on the composed bitmap so every animation frame stays symmetric.
-        const int center = info.rcWork.left + (info.rcWork.right - info.rcWork.left) / 2;
         // Tucked, the capsule slides up past the very top of the screen, leaving a
         // sliver that the pointer can reach to bring it back.
         const float shown = static_cast<float>(info.rcWork.top + Px(TopMargin));
         const int liveWidth = std::max(1, Px(drawnWidth)), liveHeight = std::max(1, Px(drawnHeight));
         const float tucked = static_cast<float>(info.rcMonitor.top + Px(TuckedSliver) - liveHeight);
-        POINT at{center - liveWidth / 2,
+        POINT at{static_cast<LONG>(std::lround(RestX(static_cast<float>(liveWidth)))),
                  static_cast<LONG>(std::lround(shown + (tucked - shown) * std::clamp(tuck.x, 0.f, 1.2f)))};
         const auto opacity = static_cast<BYTE>(std::lround(std::clamp(presence.x, 0.f, 1.f) * edgeFade * 255));
         if (!surface.Upload(bitmap) || !surface.Compose(hwnd, at, {liveWidth, liveHeight}, {}, opacity)) return false;
@@ -509,6 +620,92 @@ struct IslandWindow::Impl {
         return true;
     }
 
+    // A file dragged over the capsule opens the island and shows the shelf, so
+    // there is somewhere for it to land. Without this the drop would arrive on a
+    // collapsed sliver and the user would see nothing happen.
+    // Follows the pointer while the scrollbar's thumb is held down. Only the
+    // offset changes, so the work is a repaint, not a window re-layout.
+    // `clientY` is already in this window's client coordinates: WM_MOUSEMOVE
+    // carries those, and running them through ScreenToClient again would convert
+    // a client point as if it were a screen one, which is why the thumb never
+    // followed the pointer.
+    // Starts a scrollbar drag from the press position. Pressing the empty track
+    // jumps there first; pressing the thumb keeps its grip.
+    void BeginScrollDrag() {
+        const int total = static_cast<int>(clipRows.size());
+        if (total <= IslandShelfClipRows) return;
+        const float scale = 96.f / static_cast<float>(CanvasDpi());
+        const float y = static_cast<float>(lastPressY) * scale;
+        const auto bar = IslandShelfScrollBar(width.x, total, IslandShelfClipRows, clipOffset);
+        if (!IslandShelfScrollThumbHit(bar, width.x - IslandShelfScrollLeft - 1, y)) {
+            const int target = IslandShelfScrollOffsetFor(bar, y, total, IslandShelfClipRows);
+            if (target != clipOffset) {
+                clipOffset = target;
+                Place();
+            }
+        }
+        scrollGrabY = y;
+        scrollGrabOffset = clipOffset;
+        scrollDragging = true;
+    }
+    void DragScrollbar(int clientY) {
+        const int total = static_cast<int>(clipRows.size());
+        if (total <= IslandShelfClipRows) return;
+        const float scale = 96.f / static_cast<float>(CanvasDpi());
+        const float y = static_cast<float>(clientY) * scale;
+        const auto bar = IslandShelfScrollBar(width.x, total, IslandShelfClipRows, clipOffset);
+        // The press point relative to the thumb is preserved, so grabbing the
+        // thumb near its bottom does not snap it to the cursor.
+        const float span = std::max(1.f, bar.height - bar.thumbHeight);
+        const float perPixel = static_cast<float>(std::max(1, total - IslandShelfClipRows)) / span;
+        const int target = std::clamp(
+            static_cast<int>(std::lround(static_cast<float>(scrollGrabOffset) + (y - scrollGrabY) * perPixel)),
+            0, std::max(0, total - IslandShelfClipRows));
+        if (target == clipOffset) return;
+        clipOffset = target;
+        Place();
+    }
+    void DropHover(const IslandDropHover& state) {
+        // DragOver fires on every mouse move. Repainting on each of those (Place
+        // composes a whole frame) starves the UI thread on a slow machine and
+        // makes the shell look hung, so the work happens only on the transition
+        // into and out of the hover, never per movement.
+        if (state.over) {
+            if (!visible) return;
+            if (dropHover) return;  // already showing; a moving pointer changes nothing
+            dropHover = true;
+            if (!expanded) {
+                expanded = hoverExpanded = true;
+                presence.target = 1;
+            }
+            if (page != IslandPage::Shelf) SetPage(IslandPage::Shelf);
+            shelfTab = IslandShelfTab::Files;
+            Animate();
+            Place();
+            return;
+        }
+        if (!dropHover) return;
+        dropHover = false;
+        Animate();
+        Place();
+    }
+    // Follows the pointer while the capsule is dragged along the top edge. Only
+    // the horizontal offset changes; the capsule never leaves the top.
+    void DragTo(POINT pointer) {
+        MONITORINFO info{sizeof(info)};
+        if (!GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &info)) return;
+        const auto area = info.rcWork;
+        const auto px = static_cast<float>(std::max(1, Px(1)));
+        const float liveWidth = static_cast<float>(std::max(1, Px(std::max(drawnWidth, width.target))));
+        const float room = static_cast<float>(area.right - area.left);
+        // Keep the grab point under the cursor instead of snapping the capsule
+        // centre to it.
+        const float along = static_cast<float>(pointer.x - area.left) - dragGrabX;
+        const float offset = std::clamp(along, 0.f, std::max(0.f, room - liveWidth)) / px;
+        if (std::abs(offset - display.offset) < 0.5f) return;
+        display.offset = offset;
+        if (hwnd) Place();
+    }
     static float RadiusFor(float h) {
         const float e = std::clamp((h - CompactHeight) / (ExpandedHeight - CompactHeight), 0.f, 1.f);
         return std::min(h / 2, h / 2 + (30 - h / 2) * e);
@@ -522,7 +719,6 @@ struct IslandWindow::Impl {
         RECT window{};
         if (!GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &info) || !GetWindowRect(hwnd, &window)) return false;
         const float px = static_cast<float>(CanvasDpi()) / 96, dipScale = static_cast<float>(dpi) / 96, scale = ScaleFactor();
-        const float center = static_cast<float>(info.rcWork.left + (info.rcWork.right - info.rcWork.left) / 2);
         const float shown = static_cast<float>(info.rcWork.top + Px(TopMargin));
         keyframes.clear();
         keyframes.reserve(trajectory.size());
@@ -531,7 +727,8 @@ struct IslandWindow::Impl {
             const float tucked = static_cast<float>(info.rcMonitor.top + Px(TuckedSliver)) - h * px;
             const float y = shown + (tucked - shown) * std::clamp(m.x[3], 0.f, 1.2f);
             LumeMaterialKeyframe k{};
-            k.lensX = (center - w * px / 2 - static_cast<float>(window.left)) / dipScale;
+            // Same horizontal rule as Place(), so the glass follows the capsule.
+            k.lensX = (RestX(w * px) - static_cast<float>(window.left)) / dipScale;
             k.lensY = (y - static_cast<float>(window.top)) / dipScale;
             k.lensWidth = w * scale;
             k.lensHeight = h * scale;
@@ -907,20 +1104,40 @@ struct IslandWindow::Impl {
         pages.push_back(IslandPage::Weather);
         pages.push_back(IslandPage::Performance);
         pages.push_back(IslandPage::Todo);
+        // The clipboard and file shelf is its own page and always offered: it is
+        // where the user goes to retrieve something just copied or dropped.
+        pages.push_back(IslandPage::Shelf);
+        // One quota page, offered when any provider has a reading to show: the
+        // providers are tabs inside it, not separate wheel stops.
+        if (view.quotaAvailable || view.workbuddyAvailable || view.workbuddyAiAvailable)
+            pages.push_back(IslandPage::Quota);
         if (!reminders.empty()) pages.push_back(IslandPage::Reminder);
         return pages;
     }
+    // The dot strip is the page picker: one box per page, and a tap on a box goes
+    // straight to that page. The drawing and the hit test read the same geometry,
+    // so a dot is exactly where it looks.
     void Dots(float w, float h, float alpha) {
         const auto pages = Pages();
-        if (pages.size() < 2 || alpha <= .01f) return;
-        // Pages run left to right, so the dots do too.
-        float x = w / 2 - (static_cast<float>(pages.size()) * 10 + 6) / 2;
-        for (std::size_t i = 0; i < pages.size(); ++i) {
-            const bool current = pages[i] == page;
-            const float dot = current ? 14.f : 5.f;
-            canvas->Rounded({x, h - 9, dot, 5}, 2.5f, 0xffffff, alpha * (current ? .85f : .3f));
-            x += dot + 5;
-        }
+        if (pages.size() < 2 || pages.size() > 32 || alpha <= .01f) return;
+        int current = -1;
+        for (std::size_t i = 0; i < pages.size(); ++i)
+            if (pages[i] == page) current = static_cast<int>(i);
+        DotBox boxes[32]{};
+        DotBoxes(static_cast<int>(pages.size()), current, w, boxes);
+        for (std::size_t i = 0; i < pages.size(); ++i)
+            canvas->Rounded({boxes[i].left, h - DotStripBottom, boxes[i].width, DotStripHeight},
+                            2.5f, 0xffffff, alpha * (pages[i] == page ? .85f : .3f));
+    }
+    // Which page a tap on the dot strip selects, or -1. The box is taller than the
+    // dot: a 5 DIP bar is far below what a pointer can be expected to hit.
+    int DotAt(float x, float y, float w, float h) const {
+        const auto pages = Pages();
+        if (pages.size() > 32) return -1;
+        int current = -1;
+        for (std::size_t i = 0; i < pages.size(); ++i)
+            if (pages[i] == page) current = static_cast<int>(i);
+        return platform::windows::DotAt(static_cast<int>(pages.size()), current, w, h, x, y);
     }
     void Chevron(float cx, float cy, bool next, bool twice, float alpha) {
         const float d = next ? 1.f : -1.f;
@@ -1103,8 +1320,7 @@ struct IslandWindow::Impl {
             c.Text(L"还有 " + std::to_wstring(reminders.size() - rows) + L" 条提醒", {22, 177, w - 44, 14}, 10.5f, 0xffffff,
                    .45f * alpha);
     }
-    void SetPage(IslandPage next, int direction = 0) {
-        pageChosen = true;
+    void SetPage(IslandPage next, int direction = 0) {        pageChosen = true;
         if (next == page) return;
         if (!direction) {
             const auto pages = Pages();
@@ -1120,6 +1336,13 @@ struct IslandWindow::Impl {
         Animate();
     }
     void Wheel(int delta) {
+        // While the scrollbar's thumb is held, the pointer owns the list: a wheel
+        // tick in the middle of a drag would move it from under the hand that is
+        // dragging it, so the wheel is ignored until the button comes up.
+        if (scrollDragging) return;
+        // The shelf's list scrolls by dragging its bar, not by the wheel: the
+        // wheel's job everywhere is to move between pages, and taking it over
+        // here trapped the user on this page with no way back.
         const auto pages = Pages();
         if (!expanded) {
             // Scrolling the capsule opens straight onto the next page.
@@ -1173,6 +1396,28 @@ struct IslandWindow::Impl {
         case IslandPage::Weather: DrawIslandWeatherPage(*canvas, weather, w, h, content); break;
         case IslandPage::Performance: DrawPerformance(*canvas, w, h, performanceSample, performanceFailed, content); break;
         case IslandPage::Todo: TodoPage(w, h, content); break;
+        case IslandPage::Quota:
+            // One page, one body: the tab strip at the top stays, and the body
+            // below it shows whichever provider the user selected.
+            switch (QuotaTabInUse()) {
+            case IslandQuotaTab::WorkBuddy:
+                DrawIslandWorkBuddyPage(*canvas, workbuddy, false, view.quotaAvailable,
+                                        view.workbuddyAiAvailable, w, h, content);
+                break;
+            case IslandQuotaTab::WorkBuddyAi:
+                DrawIslandWorkBuddyPage(*canvas, workbuddyAi, true, view.quotaAvailable,
+                                        view.workbuddyAvailable, w, h, content);
+                break;
+            default:
+                DrawIslandQuotaPage(*canvas, quota, view.workbuddyAvailable,
+                                    view.workbuddyAiAvailable, w, h, content);
+                break;
+            }
+            break;
+        case IslandPage::Shelf:
+            DrawIslandShelfPage(*canvas, shelfTab, clipRows, clipEmpty, fileRows, fileEmpty,
+                                copiedRow, clipOffset, filePage, w, h, content);
+            break;
         case IslandPage::Reminder: ReminderPage(w, h, content); break;
         }
         canvas->Offset(0, 0);
@@ -1262,6 +1507,14 @@ struct IslandWindow::Impl {
         if (!dpi) dpi = 96;
         canvas = std::make_unique<WidgetCanvas>();
         if (!display.topmost) SetPropW(hwnd, lume::window_ids::DesktopWidgetProp, reinterpret_cast<HANDLE>(1));
+        // Dragging a file onto the capsule is how the shelf receives files; the
+        // target reports the hover and the drop, and the host records the paths.
+        dropTarget.Attach(hwnd,
+            [this](const IslandDropHover& state) { DropHover(state); },
+            [this](std::vector<std::string> paths, POINT) {
+                // A drop lands on the shelf page, so the user sees what happened.
+                if (filesDropped) filesDropped(std::move(paths));
+            });
         if (!SetTimer(hwnd, TickTimer, 1000, nullptr)) { Stop(); return false; }
         // Taskbar-button flashes of chat programs (best effort).
         RegisterShellHookWindow(hwnd);
@@ -1333,6 +1586,12 @@ struct IslandWindow::Impl {
     }
     void Expand(bool next, bool byHover = false) {
         if (!hwnd || expanded == next) return;
+        // A shell drag keeps the island open: collapsing mid-drag would pull the
+        // source window out from under the modal loop and cancel the drop.
+        if (!next && shellDragging) {
+            if (hwnd && !hovered) SetTimer(hwnd, CollapseTimer, 3500, nullptr);
+            return;
+        }
         expanded = next;
         if (next) { today = Today(); if (page != IslandPage::Calendar) month = {today.year, today.month, 1}; pageFade.Snap(1); }
         else { month = {today.year, today.month, 1}; selected = today; pageChosen = false; if (HasMedia()) page = IslandPage::Music; }
@@ -1348,12 +1607,42 @@ struct IslandWindow::Impl {
 
     // --- Input -----------------------------------------------------------------
 
+    // Which provider the quota page can actually show right now. A tab whose
+    // provider has no reading stays inert, so the selected tab falls back to one
+    // that has something to display instead of drawing an empty body.
+    IslandQuotaTab QuotaTabInUse() const {
+        const auto usable = [&](IslandQuotaTab tab) {
+            switch (tab) {
+            case IslandQuotaTab::WorkBuddy: return view.workbuddyAvailable;
+            case IslandQuotaTab::WorkBuddyAi: return view.workbuddyAiAvailable;
+            default: return view.quotaAvailable;
+            }
+        };
+        if (usable(quotaTab)) return quotaTab;
+        if (usable(IslandQuotaTab::DeepSeek)) return IslandQuotaTab::DeepSeek;
+        if (usable(IslandQuotaTab::WorkBuddy)) return IslandQuotaTab::WorkBuddy;
+        if (usable(IslandQuotaTab::WorkBuddyAi)) return IslandQuotaTab::WorkBuddyAi;
+        return quotaTab;
+    }
+    // The three provider tabs on the quota page. The shape lives in
+    // island_quota_tabs.cpp: drawing and hit testing there read the same numbers
+    // the taps here land on, which two private copies had already drifted from.
+    // Which tab a tap selects, or nullopt when it misses.
+    std::optional<IslandQuotaTab> QuotaTabAt(float x, float y, float w) const {
+        return IslandQuotaTabHit(x, y, w, view.quotaAvailable, view.workbuddyAvailable,
+                                 view.workbuddyAiAvailable);
+    }
     int Hit(LPARAM l) const {
         const float scale = 96.f / static_cast<float>(CanvasDpi());
         const float x = static_cast<float>(GET_X_LPARAM(l)) * scale, y = static_cast<float>(GET_Y_LPARAM(l)) * scale;
         if (x < 0 || x >= width.x || y < 0 || y >= height.x) return -1;
         if (notice && !expanded) return 400;
         if (!expanded || Expansion() < .9f) return 0;
+        // The dot strip is chrome, not page content: it has to be tested before
+        // any page branch, or a page that claims a wide area (the calendar's
+        // "left column opens the calendar") swallows the tap first and the dots
+        // never answer.
+        if (const int dot = DotAt(x, y, width.x, height.x); dot >= 0) return DotHitBase + dot;
         if (page == IslandPage::Calendar) {
             for (int i = 0; i < 4; ++i) {
                 const auto r = NavButton(i, width.x);
@@ -1382,6 +1671,59 @@ struct IslandWindow::Impl {
             return 300;
         }
         if (page == IslandPage::Weather) return weather.available?299:560;
+        // The quota page puts its provider tabs in a clickable strip: tapping a
+        // neighbour shows that provider's reading. The strip switches the body
+        // of this page rather than moving the island to another page, so the
+        // wheel keeps one stop for every provider together.
+        if (page == IslandPage::Quota) {
+            if (const auto target = QuotaTabAt(x, y, width.x))
+                return QuotaTabHitBase + static_cast<int>(*target);
+            return 299;
+        }
+        // The shelf page's tab strip and its rows are both tappable: the tabs
+        // switch what is listed, a row acts on that entry.
+        if (page == IslandPage::Shelf) {
+            const int tab = IslandShelfTabAt(x, y, width.x);
+            if (tab >= 0) return ShelfTabHitBase + tab;
+            if (IslandShelfClearAt(x, y, width.x)) return ShelfClearHit;
+            if (shelfTab == IslandShelfTab::Clipboard) {
+                const auto bar = IslandShelfScrollBar(width.x, static_cast<int>(clipRows.size()),
+                                                      IslandShelfClipRows, clipOffset);
+                if (IslandShelfScrollHit(bar, x, y)) return ShelfScrollHit;
+            } else {
+                const auto pages = IslandShelfFilePages(static_cast<int>(fileRows.size()));
+                const int arrow = IslandShelfArrowAt(x, y, width.x, pages, filePage);
+                if (arrow < 0) return ShelfArrowPrevHit;
+                if (arrow > 0) return ShelfArrowNextHit;
+            }
+            if (shelfTab == IslandShelfTab::Clipboard) {
+                const int rows = static_cast<int>(clipRows.size());
+                // A button is checked before the row it sits in: a tap on the ×
+                // must remove, not re-copy. Three buttons per row, so the code
+                // carries which row and which control.
+                const int button = IslandShelfClipButtonAt(x, y, width.x, rows);
+                if (button >= 0) {
+                    const int row = IslandShelfClipRowAt(x, y, width.x, rows);
+                    if (row < 0) return ShelfBlankHit;
+                    return ShelfClipButtonHitBase + row * 3 + button;
+                }
+                // Only the buttons act. A tap on the text itself does nothing:
+                // a row that re-copies wherever it is touched made it impossible
+                // to click near a control without copying to the clipboard.
+                return ShelfBlankHit;
+            }
+            const int cells = static_cast<int>(fileRows.size());
+            // The × on a chip removes it; anywhere else on the chip opens it.
+            const int cellButton = IslandShelfFileButtonAt(x, y, width.x, cells);
+            if (cellButton >= 0) {
+                const int cell = IslandShelfFileCellAt(x, y, width.x, cells);
+                if (cell < 0) return 299;
+                return ShelfFileRemoveHitBase + cell;
+            }
+            const int cell = IslandShelfFileCellAt(x, y, width.x, cells);
+            if (cell >= 0) return ShelfFileOpenHitBase + cell;
+            return 299;
+        }
         if (page == IslandPage::Performance) return 299;
         if (y >= 110 && y < 146) {
             const float cx = width.x / 2;
@@ -1392,6 +1734,93 @@ struct IslandWindow::Impl {
         return y < 104 ? 0 : -1;
     }
     void Click(int hit) {
+        // A tab tap changes which provider this one page shows; it does not move
+        // the island to a different wheel stop. The body fades like a page change
+        // so the switch reads as the same kind of move.
+        if (hit >= QuotaTabHitBase && hit < QuotaTabHitBase + 3) {
+            const auto next = static_cast<IslandQuotaTab>(hit - QuotaTabHitBase);
+            if (next == QuotaTabInUse()) return;
+            quotaTab = next;
+            pageFade.Snap(0);
+            pageFade.target = 1;
+            Animate();
+            Place();
+            return;
+        }
+        // A tap on a dot goes straight to that page, whichever page is showing.
+        if (hit >= DotHitBase && hit < DotHitBase + 32) {
+            const auto pages = Pages();
+            const std::size_t index = static_cast<std::size_t>(hit - DotHitBase);
+            if (index < pages.size() && pages[index] != page) {
+                pageChosen = true;
+                SetPage(pages[index]);
+            }
+            return;
+        }
+        // A shelf tab switches the listing without leaving the page; a row asks
+        // the host to act on that entry, which owns the clipboard and the files.
+        if (hit >= ShelfTabHitBase && hit < ShelfTabHitBase + 2) {
+            const auto next = static_cast<IslandShelfTab>(hit - ShelfTabHitBase);
+            if (next == shelfTab) return;
+            shelfTab = next;
+            pageFade.Snap(0);
+            pageFade.target = 1;
+            Animate();
+            Place();
+            return;
+        }
+        // A clipboard row's controls: 0 = pin, 1 = re-copy, 2 = remove.
+        if (hit >= ShelfClipButtonHitBase && hit < ShelfClipButtonHitBase + IslandShelfClipRows * 3) {
+            const int offset = hit - ShelfClipButtonHitBase;
+            const int row = offset / 3, button = offset % 3;
+            if (button == 1) {
+                // The confirmation belongs to the tap: it is recorded here so the
+                // page can draw it, and the host also re-copies the text.
+                copiedRow = row;
+                copiedStamp = GetTickCount64();
+                if (shelfAct) shelfAct(row, IslandShelfAction::Copy);
+                SetTimer(hwnd, CopiedTimer, 1400, nullptr);
+                Place();
+                return;
+            }
+            if (shelfAct)
+                shelfAct(row, button == 0 ? IslandShelfAction::Pin : IslandShelfAction::Remove);
+            return;
+        }
+        if (hit >= ShelfFileOpenHitBase && hit < ShelfFileOpenHitBase + IslandShelfFileColumns * IslandShelfFileRows) {
+            if (shelfAct) shelfAct(hit - ShelfFileOpenHitBase, IslandShelfAction::OpenFile);
+            return;
+        }
+        if (hit >= ShelfFileRemoveHitBase && hit < ShelfFileRemoveHitBase + IslandShelfFileColumns * IslandShelfFileRows) {
+            if (shelfAct) shelfAct(hit - ShelfFileRemoveHitBase, IslandShelfAction::RemoveFile);
+            return;
+        }
+        if (hit == ShelfArrowPrevHit || hit == ShelfArrowNextHit) {
+            const auto pages = IslandShelfFilePages(static_cast<int>(fileRows.size()));
+            const int next = std::clamp(filePage + (hit == ShelfArrowNextHit ? 1 : -1), 0,
+                                        std::max(0, pages - 1));
+            if (next != filePage) {
+                filePage = next;
+                SetTimer(hwnd, CopiedTimer, 1, nullptr);  // reuse the repaint path
+                KillTimer(hwnd, CopiedTimer);
+                Place();
+            }
+            return;
+        }
+        if (hit == ShelfBlankHit) {
+            // A tap on empty space inside the page is still a tap on the page: it
+            // clears the "copied" confirmation rather than collapsing the island
+            // or jumping to another page.
+            if (copiedRow >= 0) {
+                copiedRow = -1;
+                Place();
+            }
+            return;
+        }
+        if (hit == ShelfClearHit) {
+            if (shelfAct) shelfAct(0, IslandShelfAction::ClearAll);
+            return;
+        }
         if (hit == 400 && notice && notice->target) {
             const auto target = notice->target;
             DismissNotice();
@@ -1499,11 +1928,14 @@ struct IslandWindow::Impl {
         if (!GetCursorPos(&pointer)) return false;
         MONITORINFO info{sizeof(info)};
         if (!GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &info)) return false;
-        const int center = info.rcWork.left + (info.rcWork.right - info.rcWork.left) / 2;
-        const int half = std::max(1, Px(std::max(drawnWidth, width.target))) / 2 + Px(HoverGrowWidth);
-        const bool withinWidth = pointer.x >= center - half && pointer.x <= center + half;
-        if (!withinWidth) return false;
-        if (pointer.y <= info.rcMonitor.top + Px(HotBand)) return true;
+        // The band follows the capsule's actual place: it sits wherever the user
+        // dragged it along the top edge, so a screen-centre test is wrong.
+        const float liveWidth = static_cast<float>(std::max(1, Px(std::max(drawnWidth, width.target))));
+        const float restX = RestX(liveWidth);
+        const float grow = static_cast<float>(Px(HoverGrowWidth));
+        const bool withinWidth = static_cast<float>(pointer.x) >= restX - grow &&
+            static_cast<float>(pointer.x) <= restX + liveWidth + grow;
+        if (!withinWidth) return false;        if (pointer.y <= info.rcMonitor.top + Px(HotBand)) return true;
         // Below the band the island stays open only if it is already showing:
         // this is the pointer that slid down from the edge onto the capsule.
         if (!hovered) return false;
@@ -1708,6 +2140,11 @@ struct IslandWindow::Impl {
             return 0;
         }
         switch (message) {
+        case FileDragMessage:
+            // A pending "drag this chip out" request, handled after the mouse
+            // message that discovered it has finished.
+            if (self->fileDragOut) self->fileDragOut(static_cast<int>(w));
+            return 0;
         case ForegroundMessage: self->CheckForeground(); return 0;
         case PerformanceMessage:
             if (!self->performanceTarget.load()) return 0;  // a late sample after the page closed
@@ -1763,6 +2200,15 @@ struct IslandWindow::Impl {
                 KillTimer(hwnd, CollapseTimer);
                 if (!self->hovered) self->Expand(false);
                 return 0;
+            case CopiedTimer:
+                // The confirmation is a moment, not a state: it fades out on its
+                // own so the row goes back to being a row.
+                KillTimer(hwnd, CopiedTimer);
+                if (self->copiedRow >= 0) {
+                    self->copiedRow = -1;
+                    if (self->visible && self->expanded && self->page == IslandPage::Shelf) self->Place();
+                }
+                return 0;
             case NoticeTimer:
                 KillTimer(hwnd, NoticeTimer);
                 if (self->hovered) SetTimer(hwnd, NoticeTimer, 2500, nullptr);  // Keep while read.
@@ -1782,10 +2228,87 @@ struct IslandWindow::Impl {
             }
             break;
         case WM_LBUTTONDOWN:
+            self->lastPressY = GET_Y_LPARAM(l);
             self->pressed = self->Hit(l);
-            if (self->pressed >= 0) SetCapture(hwnd);
+            // The scrollbar's thumb is grabbed on the press, not on the release:
+            // waiting for a click meant the grab point was still zero when the
+            // first move arrived, so the drag computed the same offset every time
+            // and the list never moved.
+            // A chip is dragged out of the island with the same press that would
+            // open it: the movement decides which it was, so both stay available.
+            if (self->page == IslandPage::Shelf && self->shelfTab == IslandShelfTab::Files &&
+                self->pressed >= ShelfFileOpenHitBase &&
+                self->pressed < ShelfFileOpenHitBase + IslandShelfFileColumns * IslandShelfFileRows) {
+                self->pressFileCell = self->pressed - ShelfFileOpenHitBase;
+                GetCursorPos(&self->pressFilePoint);
+            } else {
+                self->pressFileCell = -1;
+            }
+            if (self->pressed == ShelfScrollHit && self->page == IslandPage::Shelf &&
+                self->shelfTab == IslandShelfTab::Clipboard) {
+                self->BeginScrollDrag();
+            }
+            if (self->pressed >= 0) {
+                SetCapture(hwnd);
+                // A press on the capsule (hit 0, not a page control) may become a
+                // drag. It is only armed here: the click path must survive a
+                // press that never moves.
+                self->armed = self->pressed == 0 && !self->expanded;
+                self->dragging = false;
+                if (self->armed) {
+                    GetCursorPos(&self->dragStart);
+                    self->dragOffsetAtPress = self->display.offset;
+                    RECT rect{};
+                    self->dragGrabX = GetWindowRect(hwnd, &rect) ?
+                        static_cast<float>(self->dragStart.x - rect.left) : 0.f;
+                }
+            }
             return 0;
         case WM_MOUSEMOVE: {
+            // A held scrollbar thumb owns the pointer: the list follows it and
+            // nothing else reacts, so the drag cannot also move the capsule.
+            if (self->scrollDragging) {
+                self->DragScrollbar(GET_Y_LPARAM(l));
+                return 0;
+            }
+            // A chip dragged far enough leaves the island: the shell runs the
+            // drag so the target program receives a normal file drop.
+            if (self->pressFileCell >= 0) {
+                POINT pointer{};
+                if (GetCursorPos(&pointer)) {
+                    const int dx = pointer.x - self->pressFilePoint.x;
+                    const int dy = pointer.y - self->pressFilePoint.y;
+                    if (dx * dx + dy * dy > DragSlop * DragSlop * 4) {
+                        const int cell = self->pressFileCell;
+                        self->pressFileCell = -1;
+                        // The click that follows is suppressed: this press became
+                        // a drag, not an open.
+                        self->pressed = -1;
+                        // Posted, not called: starting a modal shell drag inside a
+                        // mouse-move handler would run its own message loop from
+                        // inside ours. One turn later the handler has returned.
+                        PostMessageW(hwnd, FileDragMessage, static_cast<WPARAM>(cell), 0);
+                        return 0;
+                    }
+                }
+            }
+            if (self->armed) {
+                POINT pointer{};
+                if (GetCursorPos(&pointer)) {
+                    const int dx = pointer.x - self->dragStart.x, dy = pointer.y - self->dragStart.y;
+                    // Only horizontal motion drags; a mostly vertical move keeps
+                    // the press a click so the island is not torn sideways.
+                    if (std::abs(dx) > DragSlop && std::abs(dx) >= std::abs(dy)) {
+                        self->dragging = true;
+                        self->armed = false;
+                    }
+                }
+            }
+            if (self->dragging) {
+                POINT pointer{};
+                if (GetCursorPos(&pointer)) self->DragTo(pointer);
+                return 0;
+            }
             // A mouse move on the window is not by itself a hover: the resting
             // capsule covers a 48 DIP strip near the top, so trusting the
             // rectangle made the island answer anywhere near it. Only the edge
@@ -1809,6 +2332,28 @@ struct IslandWindow::Impl {
             else self->PollHot();
             return 0;
         case WM_LBUTTONUP: {
+            self->pressFileCell = -1;
+            if (self->scrollDragging) {
+                self->scrollDragging = false;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                return 0;
+            }
+            const bool wasDragging = self->dragging;
+            self->dragging = false;
+            self->armed = false;
+            if (wasDragging) {
+                // The release commits the offset the drag settled on; the host
+                // saves it so the place survives a restart.
+                self->pressed = -1;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                if (self->display.offset != self->dragOffsetAtPress && self->moved) {
+                    const auto callback = self->moved;
+                    try { callback(self->display.offset); } catch (...) {}
+                }
+                self->Activity();
+                return 0;
+            }
+            // No drag happened: this is a click after all.
             const auto hit = self->pressed;
             const bool clicked = GetCapture() == hwnd && hit >= 0 && self->Hit(l) == hit;
             self->pressed = -1;
@@ -1816,7 +2361,11 @@ struct IslandWindow::Impl {
             if (clicked) self->Click(hit);
             return 0;
         }
-        case WM_CAPTURECHANGED: self->pressed = -1; return 0;
+        case WM_CAPTURECHANGED:
+            self->armed = false;
+            self->dragging = false;
+            self->pressed = -1;
+            return 0;
         case WM_CONTEXTMENU: return 0;
         case WM_RBUTTONUP: {
             self->hoverHit = self->Hit(l);
@@ -1857,6 +2406,12 @@ bool IslandWindow::SetDisplay(const IslandDisplay& d) {
     if (startAutoHide) impl_->Activity();  // Stay out briefly, then tuck.
     return true;
 }
+void IslandWindow::SetMoving(Moving moving) { impl_->moved = std::move(moving); }
+void IslandWindow::SetOffset(float offset) {
+    if (impl_->display.offset == offset) return;
+    impl_->display.offset = offset;
+    if (impl_->hwnd) impl_->Place();
+}
 void IslandWindow::Update(IslandPresentation view) {
     const bool had = impl_->HasMedia();
     const auto oldId = impl_->view.media.id;
@@ -1876,6 +2431,51 @@ void IslandWindow::SetWeather(dynamic_island::Weather value) {
     impl_->weather = std::move(value);
     if (impl_->hwnd && impl_->visible && impl_->expanded) impl_->Place();
 }
+void IslandWindow::SetQuota(quota::DeepSeekBalance value) {
+    impl_->quota = std::move(value);
+    if (impl_->hwnd && impl_->visible && impl_->expanded) impl_->Place();
+}
+void IslandWindow::SetWorkBuddy(std::vector<IslandWorkBuddyAccount> desktop, std::vector<IslandWorkBuddyAccount> ai) {
+    impl_->workbuddy = std::move(desktop);
+    impl_->workbuddyAi = std::move(ai);
+    if (impl_->hwnd && impl_->visible && impl_->expanded && impl_->page == IslandPage::Quota)
+        impl_->Place();
+}
+void IslandWindow::SetShelf(std::vector<IslandClipRow> clipboard, std::wstring clipboardEmpty,
+                            std::vector<IslandFileRow> files, std::wstring filesEmpty) {
+    impl_->clipRows = std::move(clipboard);
+    impl_->clipEmpty = std::move(clipboardEmpty);
+    impl_->fileRows = std::move(files);
+    impl_->fileEmpty = std::move(filesEmpty);
+    // The page's own content changed; repaint only when it is the one showing.
+    if (impl_->hwnd && impl_->visible && impl_->expanded && impl_->page == IslandPage::Shelf)
+        impl_->Place();
+}
+
+void IslandWindow::SetFilesDropped(std::function<void(std::vector<std::string>)> fn) {
+    impl_->filesDropped = std::move(fn);
+}
+
+void IslandWindow::SetFileDragOut(std::function<void(int)> fn) {
+    impl_->fileDragOut = std::move(fn);
+}
+
+void IslandWindow::SetPinned(bool value) {
+    if (impl_->pinned == value) return;
+    impl_->pinned = value;
+    // The next frame re-reads the tuck target, so the capsule settles where the
+    // new state says it should without a forced jump.
+    impl_->Animate();
+}
+
+void IslandWindow::SetShellDragging(bool dragging) {
+    impl_->shellDragging = dragging;
+}
+
+void IslandWindow::SetShelfAction(std::function<void(int, IslandShelfAction)> act) {
+    impl_->shelfAct = std::move(act);
+}
+
 void IslandWindow::RefreshTodos() {
     if (impl_->page == IslandPage::Todo) impl_->LoadTodos();
     if (impl_->hwnd && impl_->visible && impl_->expanded) impl_->Place();

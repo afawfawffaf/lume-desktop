@@ -61,6 +61,13 @@ target_compile_definitions(lume-music-online PRIVATE UNICODE _UNICODE WIN32_LEAN
 target_link_libraries(lume-music-online PUBLIC lume-music-accounts lume-core)
 lume_enable_native_warnings(lume-music-online)
 
+# DeepSeek balance polling: a worker, the encrypted key store and its reading.
+add_library(lume-quota-session STATIC apps/shell/quota_session.cpp apps/shell/quota_protocol.cpp apps/shell/workbuddy_session.cpp)
+target_include_directories(lume-quota-session PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(lume-quota-session PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_link_libraries(lume-quota-session PUBLIC lume-platform-windows PRIVATE crypt32 winhttp)
+lume_enable_native_warnings(lume-quota-session)
+
 add_library(lume-music-desktop-session STATIC apps/shell/music_desktop_session.cpp)
 target_include_directories(lume-music-desktop-session PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(lume-music-desktop-session PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -162,4 +169,4 @@ lume_enable_native_warnings(lume-desktop-application)
 target_link_libraries(lume-desktop-application PUBLIC lume-music-online)
 target_link_libraries(lume-desktop-application PUBLIC lume-radial-session lume-dock-session)
 target_link_libraries(lume-desktop-application PUBLIC lume-dynamic-island)
-target_link_libraries(lume-desktop-application PUBLIC lume-music-library lume-music-desktop-session lume-music-page-session lume-notes-session)
+target_link_libraries(lume-desktop-application PUBLIC lume-music-library lume-music-desktop-session lume-music-page-session lume-notes-session lume-quota-session lume-organizer-view)

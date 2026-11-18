@@ -17,12 +17,16 @@ struct MusicDesktopState {
     std::wstring title, artist, album;
     music::PlaybackStatus status = music::PlaybackStatus::Empty;
     double position = 0, duration = 0;
-    bool playing = false, canToggle = false, canSkip = false, canSeek = false;
+    // Volume travels in the same snapshot as position: the widget draws it and
+    // reports changes back through the shared music command queue.
+    double volume = 1.0;
+    bool muted = false;
+    bool playing = false, canToggle = false, canSkip = false, canSeek = false, canVolume = false;
 };
 
 MusicDesktopState ProjectMusicDesktopState(const music::MusicSnapshot&);
 std::optional<ui::MusicPageCommand> MusicDesktopCommand(
-    const MusicDesktopState&, ui::MusicAction, double position = 0);
+    const MusicDesktopState&, ui::MusicAction, double position = 0, double volume = -1);
 
 // Resolves a track's cover (online URL or embedded local artwork) into a
 // data URL on a background worker, for surfaces that only draw data URLs.
@@ -61,6 +65,9 @@ public:
     MusicDesktopControls& operator=(const MusicDesktopControls&) = delete;
 
     void Update(const music::MusicSnapshot&);
+    // Repaints without changing anything else. Used when the parent toggles a
+    // state the widget draws (the pin) but the widget did not originate.
+    void Refresh();
     bool Configure(const widget::Preferences&);
     bool Show();
     void Hide(); // Releases widget/material/decoded cover, not playback or SMTC.

@@ -14,11 +14,16 @@ add_library(lume-platform-windows STATIC
   platform/windows/native_home_window.cpp
   platform/windows/local_settings_file_store.cpp
   platform/windows/todo/windows_local_time.cpp
+  platform/windows/quota/deepseek_balance.cpp
+  platform/windows/quota/deepseek_key_store.cpp
+  platform/windows/quota/workbuddy_balance.cpp
+  platform/windows/quota/workbuddy_store.cpp
+  platform/windows/clipboard/clipboard_history.cpp
 )
 target_include_directories(lume-platform-windows PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(lume-platform-windows PUBLIC cxx_std_17)
 target_compile_definitions(lume-platform-windows PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
-target_link_libraries(lume-platform-windows PRIVATE lume-core lume-widget-ui user32 gdi32 d3d11 dxgi dcomp uuid ws2_32 bcrypt dwmapi windowscodecs ole32 advapi32 dbghelp)
+target_link_libraries(lume-platform-windows PRIVATE lume-core lume-widget-ui user32 gdi32 d3d11 dxgi dcomp uuid ws2_32 bcrypt dwmapi windowscodecs ole32 advapi32 dbghelp winhttp crypt32)
 lume_enable_native_warnings(lume-platform-windows)
 
 # mpv C plugin: reads protected wallpapers over a named pipe (lume:// URLs).

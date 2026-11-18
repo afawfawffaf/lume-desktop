@@ -21,6 +21,9 @@ struct DynamicIslandSession::Impl {
     IslandWindow window;
     std::string error;
     IslandDisplay display;
+    // Which WorkBuddy builds have a connected account, as last reported by the
+    // host. The pages only join the wheel rotation when these are set.
+    bool workbuddyDesktop = false, workbuddyAi = false;
     bool stopped = false, english = false;
     // True while the island shows another player's Windows media session.
     bool external = false;
@@ -37,6 +40,15 @@ struct DynamicIslandSession::Impl {
         : options(std::move(o)), files(f?*f:local), store(files,limits), prefs(widget::Defaults(limits)),
           window(instance,[this](dynamic_island::Action action){Action(action);}) {
         window.SetTodoSource(options.todos);
+        // A drag that settled on a new horizontal place is saved here, so the
+        // position survives a restart.
+        window.SetMoving([this](float offset) {
+            auto next = display;
+            next.offset = offset;
+            if (!SaveDisplay(next)) return;
+            display = next;
+            Notify();
+        });
         const auto loaded=store.Load(options.preferencesPath);prefs=loaded.value;load=loaded.state;
         prefs.locked = true;
         LoadDisplay();
@@ -67,11 +79,16 @@ struct DynamicIslandSession::Impl {
         if(material=="liquid-glass")display.material=IslandMaterial::Liquid;
         else if(material=="frosted-glass")display.material=IslandMaterial::Frosted;
         else if(material=="none")display.material=IslandMaterial::None;
+        // Horizontal place along the top edge, in DIP; negative means centred.
+        const auto offset=json.find("offset");
+        if(offset!=json.end()&&offset->is_number())display.offset=offset->get<float>();
+        if(!std::isfinite(display.offset)||display.offset<0)display.offset=-1;
     }
     bool SaveDisplay(const IslandDisplay& next) {
         const auto path=DisplayPath();if(path.empty())return true;
         const auto text=nlohmann::json{{"version",1},{"hideFullscreen",next.hideFullscreen},
             {"topmost",next.topmost},{"hoverExpand",next.hoverExpand},{"autoHide",next.autoHide},{"messages",next.messages},{"size",SizeName(next.size)},
+            {"offset",std::isfinite(next.offset)?next.offset:-1.f},
             {"material",MaterialName(next.material)}}.dump();
         const auto temporary=path+".tmp";
         if(files.Write(temporary,text)&&files.Rename(temporary,path))return true;
@@ -100,6 +117,7 @@ struct DynamicIslandSession::Impl {
             {"expanded",window.Expanded()},{"focusing",model.Focusing()},{"finished",model.Finished()},
             {"remaining",model.RemainingSeconds()},{"hideFullscreen",display.hideFullscreen},
             {"topmost",display.topmost},{"hover",display.hoverExpand},{"autoHide",display.autoHide},{"size",SizeName(display.size)},
+            {"offset",std::isfinite(display.offset)?display.offset:-1.f},
             {"material",MaterialName(display.material)},
             {"loadStatus",LoadStatus()},{"error",error},
             {"result",applied?"applied":"snapshot"},{"saved",saved}}.dump();
@@ -112,7 +130,9 @@ struct DynamicIslandSession::Impl {
         wchar_t clock[16]{},date[96]{};
         swprintf_s(clock,L"%02u:%02u",time.wHour,time.wMinute);
         GetDateFormatEx(english?L"en-US":L"zh-CN",DATE_LONGDATE,&time,nullptr,date,96,nullptr);
-        window.Update({model.Playback(),clock,date,model.RemainingSeconds(),model.Focusing(),model.Finished(),english});
+        window.Update({model.Playback(),clock,date,model.RemainingSeconds(),model.Focusing(),model.Finished(),english,
+            options.quotaAvailable ? options.quotaAvailable() : false,
+            workbuddyDesktop, workbuddyAi});
     }
     bool Runtime(const widget::Preferences& next) {
         if(!next.enabled){window.Stop();if(options.weatherActive)options.weatherActive(false);return true;}
@@ -120,8 +140,7 @@ struct DynamicIslandSession::Impl {
         if(options.weatherActive)options.weatherActive(true);
         RefreshWeather();Paint();return true;
     }
-    void RefreshWeather() {
-        if(stopped)return;
+    void RefreshWeather() {        if(stopped)return;
         window.SetWeather(options.weather?options.weather():dynamic_island::Weather{});
     }
     bool Commit(widget::Preferences next) {
@@ -259,6 +278,56 @@ bool DynamicIslandSession::ShowNotice(const std::string& id,const std::wstring& 
 void DynamicIslandSession::RefreshTodos(){if(!impl_->stopped)impl_->window.RefreshTodos();}
 void DynamicIslandSession::SetRevealOnEdge(bool reveal){impl_->window.SetRevealOnEdge(reveal);}
 void DynamicIslandSession::RefreshWeather(){impl_->RefreshWeather();}
+void DynamicIslandSession::SetQuota(platform::windows::quota::DeepSeekBalance balance){
+    if(impl_->stopped)return;
+    // Repaint first: the page list is rebuilt from the presentation, so a key
+    // saved since the last paint only joins the wheel rotation after this.
+    impl_->Paint();
+    impl_->window.SetQuota(std::move(balance));
+    impl_->Paint();
+}
+void DynamicIslandSession::SetWorkBuddy(std::vector<platform::windows::IslandWorkBuddyAccount> desktop,
+                                        std::vector<platform::windows::IslandWorkBuddyAccount> ai){
+    if(impl_->stopped)return;
+    impl_->window.SetWorkBuddy(std::move(desktop),std::move(ai));
+}
+void DynamicIslandSession::SetShelf(std::vector<platform::windows::IslandClipRow> clipboard,
+                                    std::wstring clipboardEmpty,
+                                    std::vector<platform::windows::IslandFileRow> files,
+                                    std::wstring filesEmpty){
+    if(impl_->stopped)return;
+    impl_->window.SetShelf(std::move(clipboard),std::move(clipboardEmpty),
+                           std::move(files),std::move(filesEmpty));
+}
+void DynamicIslandSession::SetFileDragOut(std::function<void(int)> fn){
+    if(impl_->stopped)return;
+    impl_->window.SetFileDragOut(std::move(fn));
+}
+void DynamicIslandSession::SetPinned(bool pinned){
+    if(impl_->stopped)return;
+    impl_->window.SetPinned(pinned);
+}
+void DynamicIslandSession::SetShellDragging(bool dragging){
+    if(impl_->stopped)return;
+    impl_->window.SetShellDragging(dragging);
+}
+void DynamicIslandSession::SetShelfAction(std::function<void(int,platform::windows::IslandShelfAction)> act){
+    if(impl_->stopped)return;
+    impl_->window.SetShelfAction(std::move(act));
+}
+void DynamicIslandSession::SetFilesDropped(std::function<void(std::vector<std::string>)> fn){
+    if(impl_->stopped)return;
+    impl_->window.SetFilesDropped(std::move(fn));
+}
+void DynamicIslandSession::SetWorkBuddyAvailable(bool desktop,bool ai){
+    if(impl_->stopped)return;
+    if(impl_->workbuddyDesktop==desktop&&impl_->workbuddyAi==ai)return;
+    impl_->workbuddyDesktop=desktop;
+    impl_->workbuddyAi=ai;
+    // The page list changed, so the window has to repaint before it can be
+    // scrolled to a page that did not exist a moment ago.
+    impl_->Paint();
+}
 bool DynamicIslandSession::Running()const{return impl_->window.Handle()!=nullptr;}
 HWND DynamicIslandSession::Handle()const{return impl_->window.Handle();}
 const widget::Preferences& DynamicIslandSession::Snapshot()const{return impl_->prefs;}

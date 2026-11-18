@@ -39,9 +39,17 @@ const toParts = message => message.split('|').slice(1)
   .map(part => part === 'true' ? true : part === 'false' ? false : part);
 
 test('the C++ table was read', () => {
+  // A hard-coded count goes stale every time the host adds a range, and the
+  // number itself proves nothing. What matters is that the two tables parsed
+  // into usable shapes: a parse bug would leave an empty or malformed entry.
   assert.ok(exact.size > 100, `exact commands: ${exact.size}`);
-  assert.equal(numeric.length, 16);
+  assert.ok(numeric.length >= 16, `numeric commands: ${numeric.length}`);
   for (const message of dropMessages) assert.ok(exact.has(message), message);
+  for (const {prefix, min, max} of numeric) {
+    assert.match(prefix, /^v1\|[a-zA-Z]+\|/, `malformed numeric prefix: ${prefix}`);
+    assert.ok(Number.isInteger(min) && Number.isInteger(max) && min <= max,
+      `malformed numeric range: ${prefix} ${min}..${max}`);
+  }
 });
 
 test('every exact host command can be sent by the page', () => {

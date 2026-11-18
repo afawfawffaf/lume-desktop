@@ -226,6 +226,8 @@ function drawBackground() {
     backgroundRenderer = null;
     backgroundCanvas?.remove();
     backgroundCanvas = null;
+    // Nothing behind the lyrics: the faint tint is what keeps them readable.
+    root.classList.remove('has-background');
     return;
   }
   if (!backgroundCanvas) {
@@ -234,6 +236,9 @@ function drawBackground() {
     backgroundCanvas.setAttribute('aria-hidden', 'true');
     root.prepend(backgroundCanvas);
   }
+  // The stylesheet keys the tint off this: a card showing media lets it through
+  // instead of laying a panel over it.
+  root.classList.toggle('has-background', Boolean(media?.url));
   const visible = document.visibilityState !== 'hidden';
   if (!backgroundRenderer) {
     backgroundRenderer = mountMusicBackground(backgroundCanvas, {

@@ -46,6 +46,10 @@ inline constexpr wchar_t GlassSurfaceClass[] = L"LumeSharedMaterialSurfaceV1";
 inline constexpr UINT TrayOpenMessage = WM_APP + 42;
 // Posted to the shell's UI thread (no window): drain queued music work.
 inline constexpr UINT ShellWakeMessage = WM_APP + 43;
+// A thread timer the shell sets on itself to sample the clipboard. The clipboard
+// has no message the shell can receive (it owns no window), so the sequence
+// number is compared on a timer instead of being pushed.
+inline constexpr UINT_PTR ClipboardPollTimer = 0x4c43;
 // Also cross-window, defined beside their protocols and checked below:
 // widget_snap::Message/CancelMessage (WM_APP+0x6a4/0x6a5, sent between
 // desktop widgets) and LumeMaterialStatusChangedMessage (WM_APP+0x5a0, posted

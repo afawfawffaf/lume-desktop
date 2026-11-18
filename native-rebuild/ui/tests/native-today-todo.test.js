@@ -19,15 +19,21 @@ test('a widget the desktop layer refused reports its own error',()=>{
 });
 test('todayTodo bridge accepts only complete defined commands and states',()=>{
   const sent=[];const bridge=createBridge({postMessage:v=>sent.push(v)});
-  const commands=[['enabled',true],['enabled',false],['material','liquid-glass'],['material','frosted-glass'],['reset']];
+  const commands=[['enabled',true],['enabled',false],['material','liquid-glass'],['material','frosted-glass'],
+    ['material','solid'],['reset']];
   for(const c of commands)assert.equal(bridge.send('todayTodo',...c),true);
   assert.deepEqual(sent,commands.map(c=>['v1','todayTodo',...c].join('|')));
-  for(const c of [['enabled',1],['enabled','true'],['reset',true],['material','solid'],['reset\0']])
+  // solid is a real host command (v1|todayTodo|material|solid), so it must be
+  // accepted; only genuinely undefined materials are rejected.
+  for(const c of [['enabled',1],['enabled','true'],['reset',true],['material','glass'],['reset\0']])
     assert.equal(bridge.send('todayTodo',...c),false);
   assert.equal(validHostMessage(message()),true);
   assert.equal(validHostMessage({version:1,type:'navigate',page:'todayTodo'}),true);
-  for(const fields of [{width:319},{height:151},{width:721},{height:721},{enabled:1},{extra:true},{saved:true},
-    {result:'other'},{error:'arbitrary'},{materialStatus:'glass'},{material:'solid'},{loadStatus:'backup'}])
+  // todayTodo's real limits are width 220..720, height 152..720
+  // (today_todo_session.cpp: Limits{320,152,220,152,720,720}), so 319 is legal
+  // and only 219 falls below the floor.
+  for(const fields of [{width:219},{height:151},{width:721},{height:721},{enabled:1},{extra:true},{saved:true},
+    {result:'other'},{error:'arbitrary'},{materialStatus:'glass'},{material:'glass'},{loadStatus:'backup'}])
     assert.equal(validHostMessage(message(fields)),false,JSON.stringify(fields));
   assert.equal(validHostMessage(message({result:'applied',saved:true,loadStatus:'loaded'})),true);
   assert.equal(validHostMessage(message({result:'applied',saved:true,error:'save'})),false);

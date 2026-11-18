@@ -64,9 +64,13 @@ export const initialState = () => ({
   radialStatus:"loading",radialError:"",radialLoadStatus:"fresh",radialMaterialStatus:"inactive",
   dock:{enabled:false,running:false,material:"liquid-glass",reflection:false,iconScale:100,position:50,bottomOffset:0,iconSpacing:10,launchpadScale:100,launchpadIconScale:100,pinned:0,added:0},
   dockStatus:"loading",dockError:"",dockLoadStatus:"fresh",dockMaterialStatus:"inactive",
-  dynamicIsland:{enabled:false,running:false,locked:false,expanded:false,focusing:false,finished:false,remaining:0,
-    hideFullscreen:true,topmost:true,hover:false,autoHide:true,size:'standard',material:'none'},
+  dynamicIsland:{enabled:false,running:false,locked:false,expanded:false,focusing:false,finished:false,remaining:0,hideFullscreen:true,topmost:true,hover:false,autoHide:true,size:"standard",material:"none"},
   dynamicIslandStatus:"loading",dynamicIslandError:"",dynamicIslandLoadStatus:"fresh",
+  // The DeepSeek balance page. Nothing here is a secret: the key itself stays in
+  // the host's encrypted store and is never sent back to the page.
+  quota:{hasKey:false,running:false,ok:false,available:false,error:"",amount:"",currency:""},
+  // The four WorkBuddy slots. No token here: only what each slot last returned.
+  workbuddy:{slots:[],desktopAvailable:false,aiAvailable:false},
   wallpaper:{revision:-1,status:"idle",error:"",loadStatus:"fresh",playerAvailable:false,
     catalogStatus:"idle",catalogError:"",catalog:[],library:[],likedIds:[],displays:[],
     download:{id:"",status:"idle",received:0,total:0,error:""},pauseFullscreen:false},
@@ -243,6 +247,16 @@ export function reduce(state, event) {
         return {...state,dynamicIsland:{enabled,running,locked,expanded,focusing,finished,remaining,hideFullscreen,topmost,hover,autoHide,size,material},
           dynamicIslandError:m.error,dynamicIslandLoadStatus:m.loadStatus,
           dynamicIslandStatus:pending?'saving':failed?'error':m.saved?'saved':m.loadStatus==='recovered'?'recovered':'idle'};
+      }
+      // The quota reply only updates the page's own settings block: it is not
+      // part of the island's preference record and never affects its status.
+      if(m.type==='quota-state') {
+        return {...state,quota:{hasKey:m.hasKey,running:m.running,ok:m.ok,available:m.available,
+          error:m.error,amount:m.amount,currency:m.currency}};
+      }
+      if(m.type==='workbuddy-state') {
+        return {...state,workbuddy:{slots:m.slots.map(s=>({...s})),
+          desktopAvailable:m.desktopAvailable,aiAvailable:m.aiAvailable}};
       }
       if(m.type==="dock-state") {
         const failed=!!m.error||m.loadStatus==="failed";

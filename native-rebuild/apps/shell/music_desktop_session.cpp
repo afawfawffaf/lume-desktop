@@ -133,6 +133,14 @@ struct MusicDesktopSession::Impl {
             const auto loaded = store.Load(options.path);
             prefs = loaded.value;
             load = loaded.state;
+            // The pin is restored with the geometry, and the parent is told once
+            // here so a pinned card comes back pinned instead of looking pinned
+            // while the island still tucks away.
+            LoadPin();
+            if (pin && pinHandler) {
+                const auto callback = pinHandler;
+                try { callback(true); } catch (...) {}
+            }
         } catch (...) {
             load = widget::LoadState::Failed;
         }
@@ -181,6 +189,13 @@ struct MusicDesktopSession::Impl {
     void Native(WidgetAction action, const widget::Preferences& value) {
         if (stopped || applying || !restored) return;
         switch (action) {
+        case WidgetAction::Pin:
+            // The widget flips its own drawing immediately, so the tap feels
+            // instant; this is the authoritative copy, and the parent applies the
+            // effect. Flipping here keeps the two from drifting when the parent
+            // refuses or is absent.
+            TogglePin();
+            return;
         case WidgetAction::Settings:
             if (openSettings) {
                 const auto callback = openSettings;
@@ -256,6 +271,52 @@ struct MusicDesktopSession::Impl {
     bool stopped = false, applying = false, restored = false, restoreOk = false;
     std::string error;
     std::wstring notifiedState;
+    // The card asked to stay in front. Kept here so the parent can be told again
+    // and so a hide/show does not silently drop the state.
+    bool pin = false;
+    std::function<void(bool)> pinHandler;
+    // The pin lives beside the preferences rather than inside them: the shared
+    // widget record is validated as an exact field set, and adding a key there
+    // would make every other widget's file unreadable.
+    static std::string PinPath(const std::string& preferencesPath) {
+        const auto slash = preferencesPath.find_last_of("\\/");
+        if (slash == std::string::npos) return "";
+        return preferencesPath.substr(0, slash + 1) + "music-widget-pin.json";
+    }
+    // One place that flips the pin: the widget's own click and the public Pin()
+    // both land here, so the saved file and the reported state cannot disagree.
+    void TogglePin() {
+        pin = !pin;
+        SavePin();
+        if (pinHandler) {
+            const auto callback = pinHandler;
+            const bool pinned = pin;
+            try { callback(pinned); } catch (...) {}
+        }
+    }
+    void SavePin() {
+        if (options.verification) return;
+        const auto path = PinPath(options.path);
+        if (path.empty()) return;
+        // A temporary and a rename, like the preferences: a crash mid-write must
+        // not leave a file that no longer parses.
+        auto temporary = path;
+        temporary += ".tmp";
+        // The same file store the preferences use: a test that injects one must
+        // see the pin too, and a read-only profile must fail both the same way.
+        auto& files = options.files ? *options.files : localFiles;
+        if (!files.Write(temporary, pin ? "{\"version\":1,\"pinned\":true}" : "{\"version\":1,\"pinned\":false}")) return;
+        files.Rename(temporary, path);
+    }
+    void LoadPin() {
+        const auto path = PinPath(options.path);
+        if (path.empty()) return;
+        std::string value;
+        auto& files = options.files ? *options.files : localFiles;
+        // A missing or damaged file simply means "not pinned": the default.
+        if (!files.ReadBounded(path, 128, value)) return;
+        pin = value.find("\"pinned\":true") != std::string::npos;
+    }
     MusicDesktopControls controls;
 };
 
@@ -264,6 +325,20 @@ MusicDesktopSession::MusicDesktopSession(HINSTANCE instance, MusicDesktopSession
     : impl_(std::make_unique<Impl>(instance, std::move(options),
         std::move(commandHandler), std::move(openSettings), std::move(expand))) {}
 MusicDesktopSession::~MusicDesktopSession() = default;
+
+void MusicDesktopSession::SetPinHandler(std::function<void(bool)> handler) {
+    impl_->pinHandler = std::move(handler);
+}
+bool MusicDesktopSession::Pinned() const { return impl_->pin; }
+bool MusicDesktopSession::Pin() {
+    if (impl_->stopped) return false;
+    impl_->TogglePin();
+    impl_->controls.Refresh();
+    return impl_->pin;
+}
+HWND MusicDesktopSession::Handle() const {
+    return impl_->stopped ? nullptr : impl_->controls.Handle();
+}
 bool MusicDesktopSession::Restore() {
     const bool ok = impl_->Restore();
     impl_->NotifyChanged();

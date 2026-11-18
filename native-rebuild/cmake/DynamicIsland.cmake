@@ -3,6 +3,12 @@ add_library(lume-dynamic-island STATIC
   apps/shell/dynamic_island_session.cpp
   platform/windows/dynamic_island/island_window.cpp
   platform/windows/dynamic_island/island_weather_page.cpp
+  platform/windows/dynamic_island/island_quota_page.cpp
+  platform/windows/dynamic_island/island_quota_tabs.cpp
+  platform/windows/dynamic_island/island_workbuddy_page.cpp
+  platform/windows/dynamic_island/island_shelf_page.cpp
+  platform/windows/dynamic_island/island_dots.cpp
+  platform/windows/dynamic_island/island_drop_target.cpp
   platform/windows/dynamic_island/system_media_session.cpp
   platform/windows/dynamic_island/player_position.cpp)
 target_include_directories(lume-dynamic-island PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

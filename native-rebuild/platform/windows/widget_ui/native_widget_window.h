@@ -6,7 +6,9 @@
 #include <memory>
 #include <optional>
 namespace lume::platform::windows {
-enum class WidgetAction { Close,Settings,Reset,Lock,Liquid,Frosted,Bounds,Refresh,Solid };
+// Pin reports the music card's "keep this in front" toggle. It is separate from
+// Lock, which only stops the card from being dragged.
+enum class WidgetAction { Close,Settings,Reset,Lock,Liquid,Frosted,Bounds,Refresh,Solid,Pin };
 struct WidgetWindowPorts {
     std::function<void(WidgetCanvas&,float,float)> draw;
     std::function<void(WidgetAction,const widget::Preferences&)> action;

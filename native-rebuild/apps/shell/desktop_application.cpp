@@ -1,5 +1,9 @@
 #include "apps/shell/desktop_application.h"
 #include "platform/windows/text_util.h"
+#include "platform/windows/clipboard/clipboard_history.h"
+#include "platform/windows/organizer/organizer_icons.h"
+#include "platform/windows/organizer/organizer_icon_client.h"
+#include "platform/windows/organizer/shell_drag.h"
 #include "platform/windows/lume_window_ids.h"
 #include "platform/windows/ui_stall_trace.h"
 #include "apps/shell/calendar_session.h"
@@ -176,6 +180,34 @@ struct DesktopApplication::State {
         if(!dockCover)return std::nullopt;
         return NowPlaying{media->app,dockCover};
     }
+    QuotaSessionOptions QuotaOptions() {
+        QuotaSessionOptions value;
+        // The key lives beside every other setting; the file itself is the
+        // DPAPI blob, never plaintext.
+        if(!options.musicPreferencesPath.empty()) {
+            const auto directory=std::filesystem::u8path(options.musicPreferencesPath).parent_path();
+            value.keyPath=(directory/L"deepseek-key.bin").u8string();
+        }
+        value.verification=options.verification;
+        value.wake=[this]{Wake();};
+        return value;
+    }
+    WorkBuddySessionOptions WorkBuddyOptions() {
+        WorkBuddySessionOptions value;
+        if(!options.musicPreferencesPath.empty()) {
+            const auto directory=std::filesystem::u8path(options.musicPreferencesPath).parent_path();
+            value.storePath=(directory/L"workbuddy-accounts.bin").u8string();
+        }
+        value.verification=options.verification;
+        value.wake=[this]{Wake();};
+        return value;
+    }
+    // Where the shelf keeps its history. Next to the other per-user settings so
+    // a diagnostic report can find it, and so it survives a restart.
+    std::filesystem::path ClipboardPath() const {
+        if(options.musicPreferencesPath.empty()) return {};
+        return std::filesystem::u8path(options.musicPreferencesPath).parent_path()/L"clipboard-history.txt";
+    }
     DynamicIslandSessionOptions IslandOptions() {
         DynamicIslandSessionOptions value;
         value.preferencesPath=options.dynamicIslandPreferencesPath;
@@ -215,6 +247,9 @@ struct DesktopApplication::State {
         value.weather=[this]{return exiting?dynamic_island::Weather{}:IslandWeather(weather.Reading());};
         value.openWeatherSettings=[this]{if(!exiting)Open(ManagerPage::Weather);};
         value.weatherActive=[this](bool active){weather.SetSharedConsumer(active);};
+        // The page appears in the wheel only once a key is saved, so an unused
+        // feature does not take a stop away from the pages that work.
+        value.quotaAvailable=[this]{return !exiting&&quota.HasKey();};
         return value;
     }
     State(HINSTANCE instance,DesktopApplicationOptions options):instance(instance),options(std::move(options)),
@@ -256,6 +291,9 @@ struct DesktopApplication::State {
             [this]{Open(ManagerPage::Home);},[this]{Open(ManagerPage::Dock);},[this]{return visible;}),
         systemMedia(),
         dynamicIsland(instance, IslandOptions()),
+        quota(QuotaOptions()),
+        workbuddy(WorkBuddyOptions()),
+        clipboardPath(ClipboardPath()),
         desktopIcons(instance,this->options.desktopIconsPreferencesPath,
             Notifier(ManagerPage::Icons),
             nullptr,this->options.verification&&this->options.verificationDesktopIcons?
@@ -392,6 +430,14 @@ struct DesktopApplication::State {
         window.ConfigureThreadWake(lume::window_ids::ShellWakeMessage,[this]{DrainMusic();});
         window.ConfigureApplicationCommands([this](std::wstring_view message){
             if(exiting)return;
+            if(const auto workbuddyCommand=ParseWorkBuddyCommand(message)) {
+                HandleWorkBuddyCommand(*workbuddyCommand);
+                return;
+            }
+            if(const auto quotaCommand=ParseQuotaCommand(message)) {
+                HandleQuotaCommand(*quotaCommand);
+                return;
+            }
             if(const auto report=ParseDiagnosticReportCommand(message)) {
                 if(report->action=="open-logs")OpenLogFolder();
                 else if(report->action=="copy")StartDiagnosticJob(DiagnosticJob::Copy,report->note);
@@ -768,6 +814,11 @@ struct DesktopApplication::State {
         radial.Shutdown();
         dock.Shutdown();
         dynamicIsland.Shutdown();
+        quota.Shutdown();
+        workbuddy.Shutdown();
+        // The history is written on the way out so the next launch can offer it.
+        // Saving is best effort: a read-only profile must not block quitting.
+        if(!clipboardPath.empty())clipboardHistory.Save(clipboardPath);
         notes.Shutdown();
         musicDesktop.Shutdown();
         musicPage.Shutdown();
@@ -1037,7 +1088,118 @@ struct DesktopApplication::State {
         const wchar_t* name=page==ManagerPage::TodayTodo?L"todayTodo":page==ManagerPage::Calendar?L"calendar":page==ManagerPage::Performance?L"performance":page==ManagerPage::Spectrum?L"spectrum":page==ManagerPage::Almanac?L"almanac":page==ManagerPage::Weather?L"weather":page==ManagerPage::Organizer?L"organizer":page==ManagerPage::Icons?L"icons":page==ManagerPage::Taskbar?L"taskbar":page==ManagerPage::MinimizeAnimation?L"minimize":page==ManagerPage::Music?L"music":page==ManagerPage::Dock?L"dock":L"clock";
         Post(std::wstring(L"{\"version\":1,\"type\":\"navigate\",\"page\":\"")+name+L"\"}");
     }
+    // One sample of the clipboard per wake. Cheap when nothing changed: the
+    // sequence number only moves when some application writes to it.
+    void DrainClipboard(){
+        const auto sequence = GetClipboardSequenceNumber();
+        if(sequence == clipboardSequence) return;
+        clipboardSequence = sequence;
+        if(!clipboardEnabled) return;
+        if(const auto entry = platform::windows::clipboard::Read()) {
+            clipboardHistory.Add(entry->text);
+        }
+        PushShelf();
+    }
+    // Hands the shelf page its rows. The window never reads the clipboard or the
+    // filesystem, so a repaint cannot block on another application.
+    void PushShelf(){
+        using namespace platform::windows;
+        std::vector<IslandClipRow> clips;
+        const auto rows = clipboardHistory.Rows();
+        clips.reserve(rows.size());
+        for(const auto& row:rows){
+            IslandClipRow view;
+            view.line = clipboard::ToLine(row.text, 46);
+            view.pinned = row.pinned;
+            view.canCopy = true;
+            view.when = AgeLabel(row.at);
+            clips.push_back(std::move(view));
+        }
+        std::vector<IslandFileRow> fileRows;
+        fileRows.reserve(droppedFiles.size());
+        for(std::size_t i=0;i<droppedFiles.size();++i){
+            IslandFileRow view;
+            view.id = static_cast<std::uint64_t>(i+1);
+            view.name = NameOfPath(droppedFiles[i]);
+            view.kind = KindOfPath(droppedFiles[i]);
+            // A cached icon is used when it is already there; the cache is asked
+            // for it asynchronously and pushes a repaint when it arrives.
+            if(shelfIcons)view.icon = shelfIcons->Find(lume::text::Wide(droppedFiles[i]));
+            fileRows.push_back(std::move(view));
+        }
+        dynamicIsland.SetShelf(std::move(clips),
+            clipboardHistory.Size()?std::wstring{}:L"\u590d\u5236\u6587\u5b57\u540e\u5728\u8fd9\u91cc\u627e\u56de",
+            std::move(fileRows), droppedFiles.empty()?L"\u8fd8\u6ca1\u6709\u62d6\u5165\u6587\u4ef6":std::wstring{});
+    }
+    // Asks the icon cache for the dropped files' icons. The cache extracts on its
+    // own worker and calls back on the UI thread through the shell's wake.
+    void RequestShelfIcons(){
+        if(droppedFiles.empty())return;
+        if(!shelfIcons){
+            // The extractor runs in a disposable helper process: a broken shell
+            // extension can hang that process, never this one.
+            auto extractor = std::make_shared<platform::windows::OrganizerIconExtractor>();
+            std::atomic_bool* cancelled = new std::atomic_bool(false);
+            shelfIcons = std::make_shared<platform::windows::OrganizerIconCache>(
+                [extractor, cancelled](const std::wstring& path, const std::atomic_bool& stop, unsigned size) {
+                    return extractor->Read(path, stop, size);
+                }, false);
+            iconCancel = std::shared_ptr<std::atomic_bool>(cancelled);
+        }
+        // Only what the page can actually show is asked for: extracting an icon
+        // for the hundredth file would cost without ever being seen. The set is
+        // stable, so a second drop reuses the queued work instead of restarting
+        // the worker on every event.
+        constexpr int MaxIcons = 8;
+        std::vector<std::wstring> paths;
+        paths.reserve(static_cast<std::size_t>(std::min<int>(MaxIcons, static_cast<int>(droppedFiles.size()))));
+        for(std::size_t i=0;i<droppedFiles.size()&&i<static_cast<std::size_t>(MaxIcons);++i){
+            const auto wide = lume::text::Wide(droppedFiles[i]);
+            // The cache only accepts absolute drive paths; anything else would
+            // make SetPaths reject the whole batch.
+            if(wide.size()>=3&&wide[1]==L':'&&(wide[2]==L'\\'||wide[2]==L'/'))paths.push_back(wide);
+        }
+        if(paths==requestedIcons)return;
+        requestedIcons=paths;
+        shelfIcons->SetPaths(paths,[this]{Wake();},48);
+    }
+    // Saves the history at the moment it changes, not only at exit: a crash or a
+    // forced stop must not lose what the user just pinned or removed.
+    void PersistClipboard(){
+        if(!clipboardPath.empty())clipboardHistory.Save(clipboardPath);
+    }
+    // The extension, upper-cased, for the label under a file's icon. An unknown
+    // or missing extension is left blank rather than shown as a guess.
+    static std::wstring KindOfPath(const std::string& path){
+        const auto wide = lume::text::Wide(path);
+        const auto dot = wide.find_last_of(L'.');
+        const auto slash = wide.find_last_of(L"\\/");
+        if(dot==std::wstring::npos||(slash!=std::wstring::npos&&dot<slash))return {};
+        auto ext = wide.substr(dot+1);
+        if(ext.size()>5)return {};
+        for(auto& ch:ext)ch=static_cast<wchar_t>(towupper(ch));
+        return ext;
+    }
+    // Just the file name: the row has one line, and the folder is the same for
+    // most drops. The full path stays in droppedFiles for opening.
+    static std::wstring NameOfPath(const std::string& path){
+        auto wide = lume::text::Wide(path);
+        const auto slash = wide.find_last_of(L"\\/");
+        return slash==std::wstring::npos ? wide : wide.substr(slash+1);
+    }
+    // "刚刚", "5 分钟前", ... kept short: the row has one line for the text.
+    static std::wstring AgeLabel(std::int64_t at){
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto minutes = (now - at) / 60000;
+        if(minutes < 1) return L"\u521a\u521a";
+        if(minutes < 60) return std::to_wstring(minutes) + L" \u5206\u949f";
+        const auto hours = minutes / 60;
+        if(hours < 24) return std::to_wstring(hours) + L" \u5c0f\u65f6";
+        return std::to_wstring(hours / 24) + L" \u5929";
+    }
     void DrainMusic(){
+        DrainClipboard();
         DrainReport();
         DrainLxSync();
         while(!musicCommands.empty()) {
@@ -1105,8 +1267,118 @@ struct DesktopApplication::State {
             }
         }
         dynamicIsland.Update(std::move(islandMedia));
+        // The balance worker is polled here rather than on a timer of its own:
+        // DrainMusic already runs on every wake, and a finished fetch wakes the
+        // loop through the same call.
+        DrainQuota();
         if(musicLibraryRestored&&!options.musicLibrary.root.empty())musicLibrary.SaveQueue(snapshot);
         for(const auto& state:musicBackground.Drain())Post(state);
+    }
+    // Pushes a finished balance reading to the island and, when a key is stored,
+    // asks for a refresh so the page is never stale for long.
+    void DrainQuota(){
+        if(const auto reading=quota.Drain()){
+            dynamicIsland.SetQuota(std::move(*reading));
+            if(!exiting){Post(dynamicIsland.State());Post(QuotaStateMessage());}
+        }
+        // WorkBuddy hands over the whole slot list whenever anything changed, so
+        // the island and the settings page always show the same readings.
+        if(const auto accounts=workbuddy.Drain()){
+            PushWorkBuddy(*accounts);
+            if(!exiting)Post(WorkBuddyStateMessage(*accounts));
+        }
+        if(quota.HasKey() && !quota.Running()) quota.Refresh(false);
+        if(!workbuddy.Running()) workbuddy.Refresh(false);
+    }
+    // Splits every connected account into the two pages the island knows about
+    // and marks which of them join the wheel rotation. The count is not fixed:
+    // whatever is connected is listed.
+    std::wstring WorkBuddyStateMessage(const std::vector<WorkBuddyAccount>& accounts){
+        std::vector<WorkBuddySlotState> slots;
+        slots.reserve(accounts.size());
+        for(const auto& item:accounts){
+            WorkBuddySlotState slot;
+            slot.build=item.kind==platform::windows::quota::WorkBuddyKind::DesktopAi?"ai":"desktop";
+            slot.id=item.id;
+            slot.connected=item.connected;
+            slot.label=item.label;
+            slot.status=item.status;
+            slot.remaining=item.credits.ok?item.credits.remaining:0.0;
+            slot.plan=item.credits.plan;
+            slots.push_back(std::move(slot));
+        }
+        return EncodeWorkBuddyState(slots,
+            workbuddy.AnyConnected(platform::windows::quota::WorkBuddyKind::Desktop),
+            workbuddy.AnyConnected(platform::windows::quota::WorkBuddyKind::DesktopAi));
+    }
+    void PushWorkBuddy(const std::vector<WorkBuddyAccount>& accounts){
+        std::vector<IslandWorkBuddyAccount> desktop, ai;
+        for(const auto& item:accounts){
+            IslandWorkBuddyAccount view;
+            view.label=item.label.empty()?"WorkBuddy":item.label;
+            view.status=item.status;
+            view.credits=item.credits;
+            (item.kind==platform::windows::quota::WorkBuddyKind::DesktopAi?ai:desktop).push_back(std::move(view));
+        }
+        dynamicIsland.SetWorkBuddy(std::move(desktop),std::move(ai));
+        dynamicIsland.SetWorkBuddyAvailable(workbuddy.AnyConnected(platform::windows::quota::WorkBuddyKind::Desktop),
+            workbuddy.AnyConnected(platform::windows::quota::WorkBuddyKind::DesktopAi));
+    }
+    // The quota page's only writer. The key is saved encrypted and never echoed
+    // back to the page: the reply carries whether a key exists, nothing more.
+    void HandleQuotaCommand(const QuotaCommand& command){
+        if(exiting)return;
+        if(command.action=="set"){
+            if(!quota.SetKey(command.key))quotaError="save";
+            else quotaError.clear();
+        } else if(command.action=="clear"){
+            quota.ClearKey();
+            dynamicIsland.SetQuota({});
+            quotaError.clear();
+        } else if(command.action=="refresh"){
+            quotaError.clear();
+            quota.Refresh(true);
+        }
+        // A saved or cleared key changes the island's page list at once, without
+        // waiting for the next balance fetch to return.
+        dynamicIsland.SetQuota(quota.Reading());
+        Post(QuotaStateMessage());
+        Wake();
+    }
+    std::wstring QuotaStateMessage(){
+        const auto& reading=quota.Reading();
+        std::string amount,currency;
+        if(reading.ok&&!reading.entries.empty()){
+            amount=reading.entries.front().total;
+            currency=reading.entries.front().currency;
+        }
+        return EncodeQuotaState(quota.HasKey(),quota.Running(),reading.ok,reading.available,
+            quotaError.empty()?reading.error:quotaError,amount,currency);
+    }
+    // The WorkBuddy settings' only writer. Connecting starts the browser
+    // handshake for one build; the URL is opened here, on the UI thread, because
+    // ShellExecute needs no worker and the user should see the browser at once.
+    // Disconnecting names one account by the uid the API assigned, so every
+    // account added under a build is independent of the others.
+    void HandleWorkBuddyCommand(const WorkBuddyCommand& command){
+        if(exiting)return;
+        const auto kind=command.build=="ai"?platform::windows::quota::WorkBuddyKind::DesktopAi:
+            platform::windows::quota::WorkBuddyKind::Desktop;
+        if(command.action=="connect"){
+            if(const auto url=workbuddy.Begin(kind)){
+                const auto wide=std::wstring(url->begin(),url->end());
+                ShellExecuteW(nullptr,L"open",wide.c_str(),nullptr,nullptr,SW_SHOWNORMAL);
+            }
+        } else if(command.action=="disconnect"){
+            workbuddy.Disconnect(kind,command.id);
+        } else if(command.action=="refresh"){
+            workbuddy.Refresh(true);
+        }
+        const auto accounts=workbuddy.Accounts();
+        PushWorkBuddy(accounts);
+        Post(WorkBuddyStateMessage(accounts));
+        Post(dynamicIsland.State());
+        Wake();
     }
     void PostCurrentState(){
         if(!ready||exiting)return;
@@ -1134,6 +1406,10 @@ struct DesktopApplication::State {
         Post(musicAccounts.State());
         Post(musicDesktop.State());
         Post(musicPage.State());
+        // The quota blocks report their own state rather than belonging to the
+        // island's preference record.
+        Post(QuotaStateMessage());
+        Post(WorkBuddyStateMessage(workbuddy.Accounts()));
         if(options.notesVisible)Post(notes.State());
         if(!options.musicLibrary.root.empty())musicLibrary.Page();
         if(!options.musicPreferencesPath.empty())Post(musicPreferences.State());
@@ -1218,11 +1494,93 @@ struct DesktopApplication::State {
         if(options.radialVisible)radial.Restore();
         dock.Restore();
         dynamicIsland.SetEnglish(applicationSettings.Preferences().language=="en");dynamicIsland.Restore();
+        // The shelf's history is per-user state, loaded before the first frame so
+        // the page opens onto what the user had last time.
+        if(!clipboardPath.empty())clipboardHistory.Load(clipboardPath);
+        // A tap re-copies the entry the row stands for; the host owns both the
+        // clipboard and the history, so the window only reports the row.
+        // A file dropped on the capsule is recorded here, not in the window: the
+        // window never reads the filesystem.
+        // A chip dragged away leaves through the shell's own drag machinery, so
+        // the target program receives an ordinary file drop. The original file is
+        // never moved: the helper offers copy and link only.
+        dynamicIsland.SetFileDragOut([this](int cell){
+            if(exiting||cell<0||cell>=static_cast<int>(droppedFiles.size()))return;
+            std::vector<std::wstring> paths{lume::text::Wide(droppedFiles[static_cast<std::size_t>(cell)])};
+            // The drag is modal: the island must hold its place until it returns.
+            dynamicIsland.SetShellDragging(true);
+            platform::windows::DragPathsOut(dynamicIsland.Handle(), paths);
+            dynamicIsland.SetShellDragging(false);
+            Wake();
+        });
+        dynamicIsland.SetFilesDropped([this](std::vector<std::string> paths){
+            if(exiting)return;
+            droppedFiles.insert(droppedFiles.end(),paths.begin(),paths.end());
+            RequestShelfIcons();
+            PushShelf();
+        });
+        dynamicIsland.SetShelfAction([this](int row,platform::windows::IslandShelfAction action){
+            using platform::windows::IslandShelfAction;
+            switch(action){
+            case IslandShelfAction::Copy: {
+                const auto rows=clipboardHistory.Rows();
+                if(row<0||row>=static_cast<int>(rows.size()))return;
+                platform::windows::clipboard::CopyToClipboard(rows[static_cast<std::size_t>(row)].text);
+                return;
+            }
+            case IslandShelfAction::Pin: {
+                const auto rows=clipboardHistory.Rows();
+                if(row<0||row>=static_cast<int>(rows.size()))return;
+                clipboardHistory.TogglePin(rows[static_cast<std::size_t>(row)].id);
+                PushShelf();PersistClipboard();
+                return;
+            }
+            case IslandShelfAction::Remove: {
+                const auto rows=clipboardHistory.Rows();
+                if(row<0||row>=static_cast<int>(rows.size()))return;
+                clipboardHistory.Remove(rows[static_cast<std::size_t>(row)].id);
+                PushShelf();PersistClipboard();
+                return;
+            }
+            case IslandShelfAction::OpenFile:
+                if(row>=0&&row<static_cast<int>(droppedFiles.size()))
+                    ShellExecuteW(nullptr,L"open",lume::text::Wide(droppedFiles[static_cast<std::size_t>(row)]).c_str(),
+                                  nullptr,nullptr,SW_SHOWNORMAL);
+                return;
+            case IslandShelfAction::RemoveFile:
+                if(row>=0&&row<static_cast<int>(droppedFiles.size())){
+                    droppedFiles.erase(droppedFiles.begin()+row);
+                    PushShelf();
+                }
+                return;
+            case IslandShelfAction::ClearAll:
+                clipboardHistory.Clear();
+                droppedFiles.clear();
+                PushShelf();PersistClipboard();
+                return;
+            }
+        });
+        PushShelf();
+        // Sampling on a timer rather than on a message: the shell owns no window
+        // to hear WM_CLIPBOARDUPDATE on, and the sequence number makes a tick
+        // that finds nothing changed almost free.
+        SetTimer(nullptr,lume::window_ids::ClipboardPollTimer,700,nullptr);
         // The saved taskbar preference reaches the island before it can be toggled.
         dynamicIsland.SetRevealOnEdge(taskbar.Preferences().revealOnEdge &&
             taskbar.Preferences().hideBehavior == taskbar::HideBehavior::AutoHide);
         musicBackground.Restore();
         if(!options.musicLibrary.root.empty())musicLibrary.Restore();
+        // The music card's pin holds the island in place and keeps the card above
+        // other windows. The widget toggles its own state; this applies it.
+        musicDesktop.SetPinHandler([this](bool pinned){
+            if(exiting)return;
+            musicPinned=pinned;
+            dynamicIsland.SetPinned(pinned);
+            if(const auto handle=musicDesktop.Handle())
+                SetWindowPos(handle,pinned?HWND_TOPMOST:HWND_NOTOPMOST,0,0,0,0,
+                    SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
+            Wake();
+        });
         if(!options.musicDesktop.path.empty())musicDesktop.Restore();
         if(options.notesVisible)notes.Restore();
         applicationSettings.Restore();account.Restore();
@@ -1280,6 +1638,7 @@ struct DesktopApplication::State {
                 MSG message{};const int got=GetMessageW(&message,nullptr,0,0);
                 if(got<=0){exiting=true;awaitingQuit=false;break;}
                 if(message.message==lume::window_ids::ShellWakeMessage){DrainMusic();continue;}
+                if(message.message==WM_TIMER&&message.wParam==lume::window_ids::ClipboardPollTimer){DrainClipboard();continue;}
                 TranslateMessage(&message);lume::platform::windows::ui_stall::Run(message);
             }
             showManager=opening;
@@ -1316,6 +1675,36 @@ struct DesktopApplication::State {
     std::string dockCoverKey;
     std::shared_ptr<const platform::windows::WidgetBitmap> dockCover;
     DynamicIslandSession dynamicIsland;
+    // The DeepSeek balance worker. It fetches on its own thread and hands the
+    // reading to DrainQuota(); the island never fetches.
+    QuotaSession quota;
+    // The four WorkBuddy slots. Like the DeepSeek worker it fetches on its own
+    // threads and hands readings to DrainQuota(); the island never fetches.
+    WorkBuddySession workbuddy;
+    // The clipboard is polled from the wake loop rather than through a window
+    // message: the shell owns no window of its own to receive one, and the
+    // sequence number is the cheapest way to notice a change.
+    // Resolved once at start-up so the file survives a restart.
+    std::filesystem::path clipboardPath;
+    platform::windows::clipboard::History clipboardHistory;
+    // Paths dropped on the island, most recent last. Only the paths are kept:
+    // the file itself is never copied or moved, so removing an entry cannot
+    // destroy anything.
+    std::vector<std::string> droppedFiles;
+    // The music card's pin: the island stays put and the card stays above other
+    // windows until it is turned off again.
+    bool musicPinned = false;
+    // File icons for the shelf, extracted off the UI thread: Shell extraction can
+    // take a moment on a slow disk and must never stall a repaint.
+    std::shared_ptr<platform::windows::OrganizerIconCache> shelfIcons;
+    // What the cache was last asked for, so a repeated drop does not rebuild it.
+    std::vector<std::wstring> requestedIcons;
+    // Kept so the extractor's cancellation flag outlives the cache.
+    std::shared_ptr<std::atomic_bool> iconCancel;
+    DWORD clipboardSequence = 0;
+    bool clipboardEnabled = true;
+    // A save failure the store reported; cleared on the next successful action.
+    std::string quotaError;
     lume::platform::windows::MusicCoverResolver islandCovers{[this]{Wake();}};
     lume::platform::windows::CalendarTodoEditor islandEditor;
     IslandTodoAdapter islandTodos{todos};

@@ -8,7 +8,7 @@ import {minimizePage,minimizeStatus,minimizeNotice} from '../minimize.js';
 
 const taskbarMessage=(fields={})=>({
   version:1,type:'taskbar-state',enabled:false,running:false,transparentTaskbar:true,
-  autoHideTaskbar:false,hideBehavior:'auto-hide',applying:false,pendingRecovery:false,taskbars:0,mode:'unavailable',
+  autoHideTaskbar:false,hideBehavior:'auto-hide',revealOnEdge:false,applying:false,pendingRecovery:false,taskbars:0,mode:'unavailable',
   error:'',loadStatus:'fresh',revision:0,...fields,
 });
 const minimizeMessage=(fields={})=>({
@@ -122,7 +122,7 @@ test('source defaults and direct settings routes are represented without optimis
   assert.deepEqual([state.taskbar.enabled,state.taskbar.transparentTaskbar,state.taskbar.autoHideTaskbar],[false,true,false]);
   const reset=reduce({...state,taskbar:{...state.taskbar,enabled:true,autoHideTaskbar:true}},
     {type:'request',scope:'taskbar',key:'reset'});
-  assert.deepEqual(reset.taskbarPending,{transparentTaskbar:true,autoHideTaskbar:false,hideBehavior:'auto-hide'});
+  assert.deepEqual(reset.taskbarPending,{transparentTaskbar:true,autoHideTaskbar:false,hideBehavior:'auto-hide',revealOnEdge:false});
   assert.equal(reset.taskbar.enabled,true,'reset preserves the confirmed enable state');
   assert.deepEqual([state.minimize.enabled,state.minimize.durationMs,state.minimize.restore,state.minimize.launch,
     state.minimize.multiMonitor,state.minimize.unhideTaskbar,state.minimize.unhideDurationMs,state.minimize.engine],

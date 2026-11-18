@@ -349,6 +349,8 @@ function dispatch(event) {
   const previousWallpaper=state.wallpaper;
   state = reduce(state, event);
   if((event.type==='host'&&event.message.type==='dynamicIsland-state') ||
+     (event.type==='host'&&event.message.type==='quota-state') ||
+     (event.type==='host'&&event.message.type==='workbuddy-state') ||
      (['request','unavailable'].includes(event.type)&&event.scope==='dynamicIsland')) {
     syncIslandControls(content,state);
     if(['error','unavailable','recovered'].includes(state.dynamicIslandStatus) &&
@@ -946,6 +948,21 @@ content.addEventListener("click", (event) => {
     request("clock", "enabled", !state.clock.enabled);
   else if (button.dataset.action === "radial-toggle") request("radial","enabled",!state.radial.enabled);
   else if (button.dataset.action === "radial-reset") request("radial","reset");
+  else if (button.dataset.action === 'island-quota-save') {
+    // The input is read here and never stored in page state: the host owns the
+    // key from this point on, and the field is cleared either way.
+    const field=content.querySelector('#island-quota-key');
+    const key=field?.value?.trim()||'';
+    if(!key){showNotice(t('请先填写 API Key','Enter an API key first'));return;}
+    if(!bridge.quota('set',key))showNotice(t('API Key 格式不正确','That API key is not valid'));
+    else if(field)field.value='';
+  }
+  else if (button.dataset.action === 'island-quota-clear') bridge.quota('clear');
+  else if (button.dataset.action === 'island-workbuddy-connect')
+    bridge.workbuddy('connect', button.dataset.wbBuild);
+  else if (button.dataset.action === 'island-workbuddy-disconnect')
+    bridge.workbuddy('disconnect', button.dataset.wbBuild, button.dataset.wbId);
+  else if (button.dataset.action === 'dynamicIsland-reset') request('dynamicIsland','reset');
   else if (button.dataset.action?.startsWith('dynamicIsland-')) {
     const action=button.dataset.action.slice('dynamicIsland-'.length);
     if(action==='toggle')request('dynamicIsland','enabled',!state.dynamicIsland.enabled);

@@ -917,7 +917,92 @@ add_test(NAME lume-desktop-application-test COMMAND lume-desktop-application-tes
 set_tests_properties(lume-desktop-application-test PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 
 add_executable(lume-desktop-music-preferences-test desktop_music_preferences_test.cpp)
+# The DeepSeek balance parser: the wire format is what this build trusts, so it
+# is checked directly, without a network call or an API key.
+# The shelf keeps the last copies across a restart, so its rules are covered
+# directly: what is kept, what is refused, and what survives the file round trip.
+add_executable(lume-clip-probe clip_probe_tmp.cpp)
+target_compile_definitions(lume-clip-probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-clip-probe PRIVATE lume-platform-windows)
+set_target_properties(lume-clip-probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+# The shelf's scrollbar and paging are pure geometry, and a control whose drawn
+# position and hit area disagree reads as broken, so both are checked here.
+add_executable(lume-island-shelf-page-test island_shelf_page_test.cpp)
+target_compile_definitions(lume-island-shelf-page-test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-island-shelf-page-test PRIVATE lume-dynamic-island)
+set_target_properties(lume-island-shelf-page-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+lume_enable_native_warnings(lume-island-shelf-page-test)
+add_test(NAME lume-island-shelf-page-test COMMAND lume-island-shelf-page-test)
+set_tests_properties(lume-island-shelf-page-test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+
+add_executable(lume-clipboard-history-test clipboard_history_test.cpp)
+target_compile_definitions(lume-clipboard-history-test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-clipboard-history-test PRIVATE lume-platform-windows)
+set_target_properties(lume-clipboard-history-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+lume_enable_native_warnings(lume-clipboard-history-test)
+add_test(NAME lume-clipboard-history-test COMMAND lume-clipboard-history-test)
+set_tests_properties(lume-clipboard-history-test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+add_executable(lume-workbuddy-balance-test workbuddy_balance_test.cpp)
+target_compile_definitions(lume-workbuddy-balance-test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-workbuddy-balance-test PRIVATE lume-platform-windows)
+set_target_properties(lume-workbuddy-balance-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+lume_enable_native_warnings(lume-workbuddy-balance-test)
+add_test(NAME lume-workbuddy-balance-test COMMAND lume-workbuddy-balance-test)
+set_tests_properties(lume-workbuddy-balance-test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+# The store is what decides whether a restart keeps the accounts the user
+# authorised, so its migration of the pre-uid file shape is covered here.
+# The session owns the worker threads the settings page and the island share,
+# so its lifetime is covered directly: a mistake here ends the process.
+add_executable(lume-workbuddy-session-test workbuddy_session_test.cpp)
+target_compile_definitions(lume-workbuddy-session-test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-workbuddy-session-test PRIVATE lume-quota-session)
+set_target_properties(lume-workbuddy-session-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+lume_enable_native_warnings(lume-workbuddy-session-test)
+add_test(NAME lume-workbuddy-session-test COMMAND lume-workbuddy-session-test)
+set_tests_properties(lume-workbuddy-session-test PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+add_executable(lume-workbuddy-store-test workbuddy_store_test.cpp)
+target_compile_definitions(lume-workbuddy-store-test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-workbuddy-store-test PRIVATE lume-platform-windows crypt32)
+set_target_properties(lume-workbuddy-store-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+lume_enable_native_warnings(lume-workbuddy-store-test)
+add_test(NAME lume-workbuddy-store-test COMMAND lume-workbuddy-store-test)
+set_tests_properties(lume-workbuddy-store-test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+add_executable(lume-deepseek-balance-test deepseek_balance_test.cpp)
+target_compile_definitions(lume-deepseek-balance-test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-deepseek-balance-test PRIVATE lume-platform-windows)
+set_target_properties(lume-deepseek-balance-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+lume_enable_native_warnings(lume-deepseek-balance-test)
+add_test(NAME lume-deepseek-balance-test COMMAND lume-deepseek-balance-test)
+set_tests_properties(lume-deepseek-balance-test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
 add_executable(lume-desktop-music-library-test desktop_music_library_test.cpp)
+# These two include the implementation for its private mailbox: registering them
+# makes the widget layout and the session command path covered by ctest at all.
+add_executable(lume-desktop-music-widget-test music_desktop_controls_test.cpp)
+target_compile_definitions(lume-desktop-music-widget-test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-desktop-music-widget-test PRIVATE lume-music-desktop-controls lume-platform-windows dwmapi shell32 ole32 user32 comctl32)
+set_target_properties(lume-desktop-music-widget-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+lume_enable_native_warnings(lume-desktop-music-widget-test)
+add_dependencies(lume-desktop-music-widget-test lume-ui-assets)
+add_test(NAME lume-desktop-music-widget-test COMMAND lume-desktop-music-widget-test)
+set_tests_properties(lume-desktop-music-widget-test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+# The test supplies its own MusicDesktopControls (a link-time double that never
+# creates a window), so it compiles the session source directly instead of
+# linking the session library: that library pulls in the real controls, and the
+# two definitions of the same class would collide.
+add_executable(lume-desktop-music-session-test music_desktop_session_test.cpp ${CMAKE_SOURCE_DIR}/apps/shell/music_desktop_session.cpp)
+target_compile_definitions(lume-desktop-music-session-test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-desktop-music-session-test PRIVATE lume-platform-windows dwmapi shell32 ole32 user32)
+set_target_properties(lume-desktop-music-session-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+lume_enable_native_warnings(lume-desktop-music-session-test)
+add_dependencies(lume-desktop-music-session-test lume-ui-assets)
+add_test(NAME lume-desktop-music-session-test COMMAND lume-desktop-music-session-test)
+set_tests_properties(lume-desktop-music-session-test PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
 target_compile_definitions(lume-desktop-music-library-test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(lume-desktop-music-library-test PRIVATE lume-desktop-application)
 set_target_properties(lume-desktop-music-library-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
@@ -1394,3 +1479,11 @@ set_tests_properties(lume-music-melody-analysis-test PROPERTIES TIMEOUT 60)
 add_executable(lume-music-score-probe music_score_probe.cpp)
 target_link_libraries(lume-music-score-probe PRIVATE lume-music-score-source)
 lume_enable_native_warnings(lume-music-score-probe)
+
+# Offscreen render of the island's quota page, for reviewing the layout without
+# opening the island. Writes one PNG per state; not part of ctest.
+add_executable(lume-island-quota-render island_quota_render.cpp)
+target_compile_definitions(lume-island-quota-render PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(lume-island-quota-render PRIVATE lume-dynamic-island lume-widget-ui windowscodecs ole32)
+set_target_properties(lume-island-quota-render PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+lume_enable_native_warnings(lume-island-quota-render)

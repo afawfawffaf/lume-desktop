@@ -15,7 +15,7 @@ import {validMusicPageCommand,validMusicPageMessage} from './music-page-settings
 import {validNotesCommand,validNotesMessage} from './notes.js';
 import {validRadialShortcut,validRadialState} from './radial.js';
 import {validDockState} from './dock.js';
-import {validIslandState} from './dynamic-island.js';
+import {validIslandState,validQuotaState,validWorkBuddyState} from './dynamic-island.js';
 const styles = ["welfare", "mond", "insideDream"];
 const themes = ["spacious", "split", "todo"];
 const materials = ["liquid-glass", "frosted-glass"];
@@ -334,6 +334,8 @@ export function validHostMessage(m) {
   if (m.type === 'radial-state') return validRadialState(m);
   if (m.type === 'dock-state') return validDockState(m);
   if (m.type === 'dynamicIsland-state') return validIslandState(m);
+  if (m.type === 'quota-state') return validQuotaState(m);
+  if (m.type === 'workbuddy-state') return validWorkBuddyState(m);
   if (m.type === "account-state") return validAccountState(m);
   if (m.type === "app-settings-state") return validApplicationSettingsState(m);
   if (m.type === "app-update-notice") return validUpdateNotice(m);
@@ -507,6 +509,53 @@ export function createBridge(webview = globalThis.window?.chrome?.webview) {
           typeof webview?.postMessage !== "function") return false;
       try {
         webview.postMessage({version: 1, scope: "diagnostic-report", action, note});
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    // WorkBuddy and WorkBuddy AI are separate logins. Connecting names only the
+    // build: the account it produces is whichever one the browser signs in, so no
+    // slot has to be reserved and any number can be added. Disconnecting names the
+    // account by the uid the API assigned. No credential crosses this channel.
+    workbuddy(action, build = '', id = '') {
+      if (typeof webview?.postMessage !== 'function') return false;
+      if (!['snapshot', 'refresh'].includes(action)) {
+        if (!['desktop', 'ai'].includes(build)) return false;
+        if (action === 'connect') {
+          try {
+            webview.postMessage({version: 1, scope: 'workbuddy', action, build});
+            return true;
+          } catch {
+            return false;
+          }
+        }
+        if (action !== 'disconnect' || typeof id !== 'string') return false;
+        if (!id || id.length > 128 || /[^\x21-\x7e]/.test(id)) return false;
+      }
+      try {
+        webview.postMessage(action === 'disconnect'
+          ? {version: 1, scope: 'workbuddy', action, build, id}
+          : {version: 1, scope: 'workbuddy', action});
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    // The quota page's API key is free text, so it travels on its own small
+    // message instead of the fixed page-command table. The key is never logged
+    // and never echoed back: the host only reports whether one is stored.
+    quota(action, key = "") {
+      if (!['set', 'clear', 'refresh', 'snapshot'].includes(action) ||
+          typeof key !== 'string' || typeof webview?.postMessage !== 'function') return false;
+      if (action === 'set') {
+        const trimmed = key.trim();
+        if (!trimmed || trimmed.length > 512 || /[^\x21-\x7e]/.test(trimmed)) return false;
+      }
+      try {
+        webview.postMessage(action === 'set'
+          ? {version: 1, scope: 'quota', action, key: key.trim()}
+          : {version: 1, scope: 'quota', action});
         return true;
       } catch {
         return false;

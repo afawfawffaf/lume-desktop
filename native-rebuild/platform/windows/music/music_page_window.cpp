@@ -259,6 +259,13 @@ struct MusicPageWindow::State : std::enable_shared_from_this<State> {
         p.opticalProfile = 1;
         p.lightForeground = 1;
         p.cornerRadius = kCornerRadius;
+        // The card is a lyric surface over the desktop, not a pane in front of it:
+        // with the glass at zero opacity the wallpaper behind shows through
+        // unchanged, which is what "blend into the wallpaper" means. The material
+        // is still attached so the app keeps its rounded alpha window; only its
+        // pixels become invisible.
+        p.opacityEnabled = 1;
+        p.opacity = 0.f;
         BOOL animation = TRUE;
         SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animation, 0);
         p.reducedMotion = animation ? 0u : 1u;
