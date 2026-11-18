@@ -151,6 +151,22 @@ export function musicPlaybackError(error) {
   }[error] || '音乐操作未成功';
 }
 
+// Local library and LX sync failures each have a different fix, so they are named
+// rather than collapsed into one "read failed". A silent generic message left the
+// user with no idea whether to install something, open a program, or configure a
+// playlist.
+function localLibraryError(error) {
+  return {
+    'unavailable':'本地音乐库不可用，请检查文件夹设置',
+    'busy':'正在处理，请稍候再试',
+    'missing-python':'LX 同步需要 Python：安装 Python 并勾选 Add to PATH 后重启 Lume',
+    'missing-lx-db':'找不到 LX Music 数据：先安装 LX Music 并打开一次',
+    'no-playlist':'LX 里没有可同步的歌单：先建一个歌单并加歌',
+    'no-resolver':'未配置解析站：在 lxsync-config.json 填 resolver',
+    'missing-ffmpeg':'转码需要 ffmpeg：安装后加入 PATH',
+  }[error] || '本地音乐库读取失败，请重试';
+}
+
 function artwork(track, className, fallback='disc') {
   const source = safeImage(track?.artwork);
   return `<span class="${className}">${icon(fallback)}${source ? `<img data-music-image src="${escapeHtml(source)}" alt="" loading="lazy" decoding="async" draggable="false">` : ''}</span>`;
@@ -307,7 +323,7 @@ function homeContent(state, view, library) {
     <div class="MusicToolbar" data-music-home-toolbar><button class="MusicPrimaryButton" type="button" data-music-action="${localTrack(first)?'local-play':onlineTrack(first)?'online-play':'play-now'}" data-music-track="${escapeHtml(first?.id)}" data-music-index="${firstIndex}" ${!first || loading || error || !isLocal&&library.busy || firstIndex<0&&!localTrack(first)&&!onlineTrack(first) ? 'disabled' : ''}>${icon('play')}播放</button>
       <div class="MusicListSearch">${view.listSearchOpen ? `<label>${icon('search')}<input data-music-list-search maxlength="512" aria-label="搜索当前列表" placeholder="搜索当前列表" value="${escapeHtml(view.listQuery || '')}">${control('close-list-search','关闭列表搜索','close')}</label>` : `<button type="button" class="MusicTextButton" data-music-action="list-search" aria-expanded="false">${icon('search')}搜索</button>`}</div>${pager}</div>
     ${loading&&!library.appending?'<p class="MusicEmptyQueue" role="status">正在加载...</p>':
-      error&&!library.appending?`<div class="MusicEmptyQueue" role="status">${escapeHtml(isLocal?'本地音乐库读取失败，请重试':musicOnlineError(error))}${control(isLocal?'local-retry':'online-retry','重试','reset')}</div>`:
+      error&&!library.appending?`<div class="MusicEmptyQueue" role="status">${escapeHtml(isLocal?localLibraryError(error):musicOnlineError(error))}${control(isLocal?'local-retry':'online-retry','重试','reset')}</div>`:
       trackTable(state,visible,visible.length?'':terms.join(' '),{library})}
     ${!isLocal&&library.appending?`<div class="MusicLoadMore" role="status">${error?
       `${escapeHtml(musicOnlineError(error))}${control('online-retry','重试','reset')}`:loading?'正在加载...':''}</div>`:''}`;

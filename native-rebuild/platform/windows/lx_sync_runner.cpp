@@ -27,6 +27,15 @@ std::wstring FindPython() {
     return L"python.exe";
 }
 
+// True when a python interpreter can actually be started. FindPython falls back
+// to the bare name, which CreateProcess resolves through PATH; if that fails the
+// helper never runs, so this asks the shell the same question beforehand.
+bool HasPython() {
+    wchar_t buffer[MAX_PATH * 2]{};
+    return SearchPathW(nullptr, L"python.exe", nullptr, static_cast<DWORD>(std::size(buffer)),
+                       buffer, nullptr) > 0;
+}
+
 void CloseHandleIf(void*& value) {
     if (value) {
         CloseHandle(AsHandle(value));
@@ -53,6 +62,23 @@ bool LxSyncRunner::Start(const std::wstring& script, const std::wstring& outputD
         if (running_) return false;
     }
     if (GetFileAttributesW(script.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+    // A machine without Python cannot run the helper at all. Checking here turns
+    // that into an immediate, specific answer instead of a child process that
+    // fails to start and leaves the page saying only "unavailable".
+    if (!HasPython()) {
+        // Reported as a finished-with-error event rather than only returning
+        // false, so the page can say what is missing instead of "unavailable".
+        LxSyncEvent failed;
+        failed.finished = true;
+        failed.failed = true;
+        failed.error = "missing-python";
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            events_.push_back(std::move(failed));
+        }
+        if (wake_) wake_();
+        return false;
+    }
 
     SECURITY_ATTRIBUTES attributes{};
     attributes.nLength = sizeof(attributes);

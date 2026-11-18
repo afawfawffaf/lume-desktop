@@ -85,10 +85,35 @@ def db_path():
     return os.path.join(os.environ.get('APPDATA', ''), 'lx-music-desktop', 'LxDatas', 'lx.data.db')
 
 
+def discover_list(conn):
+    """没有指定歌单时，自动选一个。
+
+    LX 里有三种 listId：用户在 my_list 里建的歌单、'default'（默认收藏）、
+    'temp'（临时列表）。只有第一种是用户认知里的"歌单"，所以只从 my_list
+    里挑曲目最多的那个。留空而自动选中一个，比让用户去数据库里找 ID 好。
+    """
+    try:
+        row = conn.execute(
+            """select l.id, l.name, count(m.id) as songs
+               from my_list l
+               left join my_list_music_info m on m.listId = l.id
+               group by l.id
+               having songs > 0
+               order by songs desc
+               limit 1""").fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return row['id'], row['name'], row['songs']
+
+
 def open_db():
     path = db_path()
     if not os.path.exists(path):
-        raise RuntimeError('找不到 LX 数据库，请先打开一次 LX Music')
+        # Two cases with one message: the program is not installed, or it is but
+        # has never been opened (LX creates the database on first run).
+        raise RuntimeError('missing-lx-db')
     conn = sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
@@ -520,24 +545,33 @@ def main():
     RESOLVER = (args.resolver or config.get('resolver') or '').strip()
     if not RESOLVER:
         emit('LVEND', {'ok': 0, 'fail': 0, 'skip': 0, 'converted': 0, 'total': 0,
-                       'error': '未配置解析站：在 lxsync-config.json 填 resolver，或用 --resolver 传入'})
+                       'error': 'no-resolver'})
         return 1
     if '{id}' not in RESOLVER:
         emit('LVEND', {'ok': 0, 'fail': 0, 'skip': 0, 'converted': 0, 'total': 0,
-                       'error': '解析站模板缺少 {id} 占位符'})
+                       'error': 'no-resolver'})
         return 1
     # 歌单和输出目录也允许由配置文件补足，命令行优先。
     if not args.list:
         args.list = config.get('list') or ''
-    if not args.list:
-        emit('LVEND', {'ok': 0, 'fail': 0, 'skip': 0, 'converted': 0, 'total': 0,
-                       'error': '未配置歌单：在 lxsync-config.json 填 list，或用 --list 传入'})
-        return 1
     if not args.out:
         args.out = config.get('out') or DEFAULT_OUT
     counters = {}
     try:
         conn = open_db()
+        if not args.list:
+            # Nothing configured: use the user's own playlist instead of asking
+            # for a database id a normal person has no way to find. Reported
+            # through the progress stream so the UI can say which one it took.
+            found = discover_list(conn)
+            if not found:
+                conn.close()
+                emit('LVEND', {'ok': 0, 'fail': 0, 'skip': 0, 'converted': 0, 'total': 0,
+                               'error': 'no-playlist'})
+                return 1
+            args.list, picked_name, picked_songs = found
+            emit('LVP', {'stage': 'resolve', 'list': args.list,
+                         'name': picked_name, 'songs': picked_songs})
         rows = [dict(r) for r in conn.execute(
             'select id,listId,name,singer,source,meta from my_list_music_info where listId=? order by rowid',
             (args.list,))]
@@ -558,7 +592,7 @@ def main():
     total = len(rows)
     if not total:
         emit('LVEND', {'ok': 0, 'fail': 0, 'skip': 0, 'converted': 0, 'total': 0,
-                       'error': '歌单是空的，先在 LX 里加歌'})
+                       'error': 'no-playlist'})
         return 1
 
     try:
