@@ -4,6 +4,8 @@
 
 #include <windows.h>
 
+#include <filesystem>
+
 #include <string>
 #include <vector>
 
@@ -17,9 +19,21 @@ HANDLE AsHandle(void* value) { return static_cast<HANDLE>(value); }
 
 std::wstring Quote(const std::wstring& value) { return L"\"" + value + L"\""; }
 
-// The helper is a plain script run by whatever Python the machine already has;
-// Lume never installs or bundles an interpreter.
+// The interpreter shipped next to the program, when the build includes one. A
+// portable copy removes the most common setup failure, so it is preferred over
+// whatever the machine happens to have on PATH.
+std::wstring BundledPython() {
+    wchar_t module[MAX_PATH * 2]{};
+    const DWORD length = GetModuleFileNameW(nullptr, module, static_cast<DWORD>(std::size(module)));
+    if (!length || length >= std::size(module)) return {};
+    auto path = std::filesystem::path(module).parent_path() / L"python-runtime" / L"python.exe";
+    return GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES ? std::wstring{} : path.wstring();
+}
+
+// The helper needs an interpreter; Lume uses its own when one is shipped and
+// otherwise whatever the machine has on PATH.
 std::wstring FindPython() {
+    if (auto bundled = BundledPython(); !bundled.empty()) return bundled;
     wchar_t buffer[MAX_PATH * 2]{};
     const DWORD length = SearchPathW(nullptr, L"python.exe", nullptr,
                                      static_cast<DWORD>(std::size(buffer)), buffer, nullptr);
@@ -27,10 +41,11 @@ std::wstring FindPython() {
     return L"python.exe";
 }
 
-// True when a python interpreter can actually be started. FindPython falls back
-// to the bare name, which CreateProcess resolves through PATH; if that fails the
-// helper never runs, so this asks the shell the same question beforehand.
+// True when an interpreter can actually be started. A bundled copy counts even
+// though it is not on PATH; without one the bare name is resolved through the
+// shell, and a failure there means the helper never runs at all.
 bool HasPython() {
+    if (!BundledPython().empty()) return true;
     wchar_t buffer[MAX_PATH * 2]{};
     return SearchPathW(nullptr, L"python.exe", nullptr, static_cast<DWORD>(std::size(buffer)),
                        buffer, nullptr) > 0;
